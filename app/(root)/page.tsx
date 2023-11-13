@@ -4,7 +4,7 @@ import ThreadCard from "@/components/cards/ThreadCard";
 
  
 export default async function Home() {
-  const result = await fetchPosts(1,30);
+  const result = {posts: []} //await fetchPosts(1,30);
   const user = await currentUser();
   
   return (
@@ -12,8 +12,8 @@ export default async function Home() {
       <h1 className="head-text text-left">Home</h1>
       <section>
         {
-          result.posts.length === 0 ?
-          <p>No Threads Found</p>:
+          result?.posts.length === 0 ?
+          <p className="text-light-1 mt-10">No Threads Found</p>:
           <>
           {
             result.posts.map(post => 

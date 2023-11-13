@@ -52,14 +52,12 @@ export async function fetchPosts(pageNumber = 1, pageSize=20){
             }
         })
 
-        // const totalPostsCount = await Thread.countDocuments({ parentId: {$in: [null, undefined]}})
+        const totalPostsCount = await Thread.countDocuments({ parentId: {$in: [null, undefined]}})
         const posts = await fetchPostsQuery.exec()
 
-        const isNext = 2 > (skipAmount + posts.length);
+        const isNext = totalPostsCount > (skipAmount + posts.length);
 
         return { posts, isNext }
-
-
 
     }catch(error: any){
         throw new Error(`Failed to fetch Posts: ${error.message}`)
