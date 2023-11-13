@@ -22,7 +22,7 @@ export async function updateUser({
     image,
     path
 }: Params): Promise<void> {
-    await connectToDB();
+    connectToDB();
     try{
         await User.findOneAndUpdate(
             {id: userId},
@@ -46,7 +46,7 @@ export async function updateUser({
 
 export async function fetchUser(userId: string){
     try {
-        await connectToDB();
+        connectToDB();
         return await User.findOne({id: userId})
         
 
@@ -57,7 +57,7 @@ export async function fetchUser(userId: string){
 
 export async function fetchuserPosts(userId: string){
     try {
-        await connectToDB();
+        connectToDB();
         // TODO POpulate Community
         const threads = await User.findOne({id: userId})
             .populate({
@@ -93,7 +93,7 @@ export async function fetchUsers({
     sortBy?: SortOrder
 }){
     try{
-        await connectToDB();
+        connectToDB();
 
         const skipAmount = (pageNumber - 1) * pageSize
 
