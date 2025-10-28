@@ -1,10 +1,8 @@
-Project Preview link: http://threads-app-pink-five.vercel.app/
-
-
-
 #!/usr/bin/env python3
 """
 Hardcoded scan for MI_Input_ files; only count missing dates on weekdays (Mon–Fri).
+Also prints full Runfiles paths and, when the Runfiles folder itself is missing,
+reports Total Missing and Missing Dates explicitly for that path.
 
 Folder pattern under ROOT:
   <ROOT>/<PROJECT>/
@@ -12,7 +10,6 @@ Folder pattern under ROOT:
       message/<ANY_SUBFOLDER>/Runfiles/<FILES...>
 
 Files of interest: filename must START with YYYY-MM-DD and contain "MI_Input_".
-Example: 2025-10-23-xyz-MI_Input_foo.csv  ✅
 """
 
 from __future__ import annotations
@@ -71,6 +68,7 @@ def main():
 
     # Only expect weekdays (Mon–Fri)
     expected_dates = [d.strftime("%Y-%m-%d") for d in daterange(start_dt, end_dt) if is_weekday(d)]
+    expected_dates_set = set(expected_dates)
 
     print(f"\nScanning: {ROOT}")
     print(f"Targets: {TARGETS}")
@@ -87,6 +85,9 @@ def main():
     total_expected = 0
     total_missing  = 0
 
+    # Track paths where Runfiles folder itself is missing
+    runfiles_missing_rows = []  # list of (full_path, missing_count, missing_dates_str)
+
     for project in projects:
         project_name = project.name
         for target in TARGETS:
@@ -102,34 +103,53 @@ def main():
 
             for child in child_dirs:
                 run_dir = child / RUNFILES_NAME
-                present = collect_present_dates(run_dir)
+                run_dir_path = run_dir.absolute()
+                runfiles_exists = run_dir.is_dir()
 
-                # Only consider expected weekday dates
-                missing = [d for d in expected_dates if d not in present]
+                if runfiles_exists:
+                    present = collect_present_dates(run_dir)
+                    present_weekdays = present & expected_dates_set
+                    missing = [d for d in expected_dates if d not in present_weekdays]
+                else:
+                    # If the Runfiles folder is missing, ALL expected weekday dates are missing
+                    present_weekdays = set()
+                    missing = expected_dates[:]
 
                 total_expected += len(expected_dates)
                 total_missing  += len(missing)
 
-                print(f"{project_name} / {target} / {child.name}")
-                print(f"  Runfiles: {run_dir} {'(OK)' if run_dir.is_dir() else '(MISSING)'}")
-                print(f"  Present (weekday dates only): {len(present & set(expected_dates))} / {len(expected_dates)}")
+                print(f"Path: {run_dir_path}")
+                print(f"  Runfiles exists: {'YES' if runfiles_exists else 'NO'}")
+                print(f"  Present (weekday dates only): {len(present_weekdays)} / {len(expected_dates)}")
 
                 if missing:
                     preview = ", ".join(missing[:10])
                     more = f" (+{len(missing)-10} more)" if len(missing) > 10 else ""
-                    print(f"  MISSING weekdays ({len(missing)}): {preview}{more}")
+                    print(f"  TOTAL MISSING (weekdays): {len(missing)}")
+                    print(f"  MISSING DATES (weekdays): {preview}{more}")
                 else:
-                    print("  MISSING weekdays: None")
+                    print("  TOTAL MISSING (weekdays): 0")
+                    print("  MISSING DATES (weekdays): None")
                 print()
 
+                # Record row for CSV (includes path and a flag)
                 rows_for_csv.append((
                     project_name,
                     target,
                     child.name,
-                    len(present & set(expected_dates)),
+                    str(run_dir_path),
+                    'YES' if runfiles_exists else 'NO',
+                    len(present_weekdays),
                     len(missing),
                     ";".join(missing)
                 ))
+
+                if not runfiles_exists:
+                    runfiles_missing_rows.append((
+                        str(run_dir_path),
+                        len(missing),
+                        ";".join(missing)
+                    ))
 
     coverage = 0.0 if total_expected == 0 else (1 - total_missing / total_expected) * 100
     print("====== SUMMARY (Weekdays Only) ======")
@@ -137,11 +157,31 @@ def main():
     print(f"Missing overall:                    {total_missing}")
     print(f"Coverage:                           {coverage:.2f}%")
 
+    if runfiles_missing_rows:
+        print("\n====== RUNFILES MISSING SUMMARY ======")
+        for full_path, miss_count, miss_dates in runfiles_missing_rows:
+            # For readability, show only a short preview of dates
+            dates_list = miss_dates.split(";") if miss_dates else []
+            preview = ", ".join(dates_list[:10])
+            more = f" (+{len(dates_list)-10} more)" if len(dates_list) > 10 else ""
+            print(f"{full_path}")
+            print(f"  TOTAL MISSING (weekdays): {miss_count}")
+            print(f"  MISSING DATES (weekdays): {preview}{more}\n")
+
     if CSV_OUT:
         CSV_OUT.parent.mkdir(parents=True, exist_ok=True)
         with open(CSV_OUT, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["Project", "Target", "ChildFolder", "PresentCount(Weekdays)", "MissingCount(Weekdays)", "MissingDates(Weekdays)"])
+            w.writerow([
+                "Project",
+                "Target",
+                "ChildFolder",
+                "RunfilesPath",
+                "RunfilesExists",
+                "PresentCount(Weekdays)",
+                "MissingCount(Weekdays)",
+                "MissingDates(Weekdays)"
+            ])
             w.writerows(rows_for_csv)
         print(f"\nCSV written: {CSV_OUT}")
 
