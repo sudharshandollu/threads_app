@@ -1,144 +1,130 @@
-#!/usr/bin/env python3
-# SMB Previous Versions (@GMT snapshots) copier — NO ADMIN REQUIRED.
-# Copies MI_Input_ files for given BusinessDate(s) from the newest server snapshot
-# into your custom folder. Works for CSV/Parquet. Requires snapshot support on the SMB share.
-
-import subprocess, shlex, sys, os, shutil
+import os, sys, shutil, pandas as pd
+from datetime import datetime
 from pathlib import Path
-from typing import List, Set
-import pandas as pd
+from typing import List, Set, Tuple, Optional
 
-# =======================
-# CONFIG — EDIT THESE
-# =======================
-SHARE_ROOT       = r"\\SERVER\Share"                      # e.g. r"\\filesrv01\deptdata"
-RUNFILES_REL     = r"ProjectA\state\foo\Runfiles"         # path inside the share to Runfiles
-TARGET_DATES     = ["2025-10-23"]                         # missing BusinessDate(s), YYYY-MM-DD
-OUT_DIR          = Path(r"C:\Recovered\Runfiles")         # your custom destination
-FILENAME_TOKEN   = "MI_Input_"                             # only consider files containing this token
-BUSINESS_DATE_COL= "BusinessDate"                          # case-insensitive
-SCAN_FILE_TYPES  = {".csv", ".parquet"}                    # extend if needed
-STOP_AT_FIRST_SNAPSHOT_WITH_MATCHES = True                 # True = only the newest snapshot per date
-# =======================
+# ======================
+# CONFIG
+# ======================
+RUNFILES_PATH = r"Y:\ProjectA\state\foo\RunFiles"    # your live Runfiles folder
+TARGET_DATES  = ["2025-10-23"]                       # BusinessDate(s) to recover
+OUT_DIR       = Path(r"C:\Recovered\Runfiles")       # where to copy recovered files
+FILENAME_TOKEN = "MI_Input_"
+BUSINESS_DATE_COL = "BusinessDate"
+SCAN_FILE_TYPES = {".csv", ".parquet"}
+# ======================
 
-def _run_cmd(cmd: str) -> str:
-    proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True)
+def find_gmt_snapshots_inside_parent(runfiles_path: str) -> List[str]:
+    """List all @GMT-* folders inside the parent of Runfiles."""
+    parent = os.path.dirname(runfiles_path.rstrip("\\/"))
+    pattern = os.path.join(parent, "@GMT-*")
+    cmd = f'cmd /c dir /b "{pattern}"'
+    from subprocess import run
+    proc = run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"Command failed: {cmd}")
-    return proc.stdout
+        raise SystemExit(proc.stderr or "Could not list @GMT snapshots")
+    snaps = [os.path.join(parent, line.strip()) for line in proc.stdout.splitlines() if line.strip()]
+    snaps.sort(reverse=True)
+    return snaps
 
-def list_gmt_snapshots(share_root: str) -> List[str]:
-    """
-    Returns the list of @GMT-YYYY.MM.DD-HH.MM.SS snapshot names (newest → oldest)
-    from the SMB share root. Works without admin if server exposes snapshots.
-    """
-    # Use cmd /c dir so Windows resolves the virtual @GMT-* dirs on the share
-    pattern = fr'{share_root}\@GMT-*'
-    out = _run_cmd(f'cmd /c dir /b "{pattern}"')
-    # Each line is a full UNC path like \\SERVER\Share\@GMT-2025.10.23-12.00.03
-    lines = [l.strip() for l in out.splitlines() if l.strip()]
-    # Sort descending by their string (works because format is lexicographically sortable by date-time)
-    lines.sort(reverse=True)
-    return lines
-
-def snapshot_runfiles_path(gmt_path: str, runfiles_rel: str) -> Path:
-    return Path(gmt_path) / runfiles_rel
-
-def read_business_dates_from_file(p: Path, want_col_lower: str) -> Set[str]:
+def read_business_dates(file_path: str) -> Set[str]:
+    ext = os.path.splitext(file_path)[1].lower()
     dates: Set[str] = set()
     try:
-        if p.suffix.lower() == ".csv":
-            df = pd.read_csv(p, dtype=str, low_memory=False)
-        elif p.suffix.lower() == ".parquet":
-            df = pd.read_parquet(p)
+        if ext == ".csv":
+            df = pd.read_csv(file_path, dtype=str, low_memory=False)
+        elif ext == ".parquet":
+            df = pd.read_parquet(file_path)
         else:
-            return dates
-        cols_lower = {c.lower(): c for c in df.columns}
-        if want_col_lower not in cols_lower:
-            return dates
-        col = cols_lower[want_col_lower]
-        s = pd.to_datetime(df[col], errors="coerce").dropna()
+            return set()
+        cols = {c.lower(): c for c in df.columns}
+        if BUSINESS_DATE_COL.lower() not in cols:
+            return set()
+        s = pd.to_datetime(df[cols[BUSINESS_DATE_COL.lower()]], errors="coerce").dropna()
         for dt in s.dt.to_pydatetime():
             dates.add(dt.strftime("%Y-%m-%d"))
     except Exception:
-        # Swallow read errors; just treat as no dates.
         pass
     return dates
 
-def copy_matches_for_date_from_snapshot(snapshot_runfiles: Path, target_date: str, out_dir: Path) -> List[Path]:
-    """
-    Scan snapshot Runfiles; copy files whose BusinessDate contains target_date into out_dir/target_date.
-    """
-    copied: List[Path] = []
-    if not snapshot_runfiles.is_dir():
-        return copied
-
-    for f in snapshot_runfiles.iterdir():
-        if not f.is_file():
+def copy_files_for_date(snapshot_runfiles: str, target_date: str, out_dir: Path) -> int:
+    count = 0
+    if not os.path.isdir(snapshot_runfiles):
+        return 0
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name in os.listdir(snapshot_runfiles):
+        if FILENAME_TOKEN not in name:
             continue
-        if FILENAME_TOKEN not in f.name:
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in SCAN_FILE_TYPES:
             continue
-        if f.suffix.lower() not in SCAN_FILE_TYPES:
-            continue
-
-        dates_in_file = read_business_dates_from_file(f, BUSINESS_DATE_COL.lower())
-        if target_date in dates_in_file:
-            dest_dir = out_dir / target_date
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / f.name
-            # Avoid overwrite collisions
+        src = os.path.join(snapshot_runfiles, name)
+        dates = read_business_dates(src)
+        if target_date in dates:
+            dest = out_dir / name
             if dest.exists():
-                stem, suf = os.path.splitext(f.name)
-                dest = dest_dir / f"{stem}__from_{snapshot_runfiles.parent.name}{suf}"
-            shutil.copy2(f, dest)
-            copied.append(dest)
-    return copied
+                base, suf = os.path.splitext(name)
+                dest = out_dir / f"{base}__from_{os.path.basename(os.path.dirname(snapshot_runfiles))}{suf}"
+            shutil.copy2(src, dest)
+            print(f"  Copied {dest}")
+            count += 1
+    return count
+
+def find_nearest_less_date(all_dates: Set[str], target: str) -> Optional[str]:
+    less = [d for d in all_dates if d < target]
+    return max(less) if less else None
 
 def main():
-    # Validate share path
-    live_runfiles = Path(SHARE_ROOT) / RUNFILES_REL
-    print(f"Live path: {live_runfiles}")
-    if not Path(SHARE_ROOT).exists():
-        sys.exit(f"ERROR: Share root not accessible: {SHARE_ROOT}")
-    # Listing snapshots
-    try:
-        gmt_paths = list_gmt_snapshots(SHARE_ROOT)
-    except RuntimeError as e:
-        sys.exit(
-            f"ERROR: Could not enumerate @GMT snapshots. Details: {e}\n"
-            f"- Ensure the file server has Shadow Copies enabled for this share.\n"
-            f"- You must point SHARE_ROOT at the **share root** (e.g., \\\\SERVER\\Share)."
-        )
+    snaps = find_gmt_snapshots_inside_parent(RUNFILES_PATH)
+    if not snaps:
+        sys.exit("No @GMT snapshots found under Runfiles’ parent folder.")
+    print(f"Found {len(snaps)} snapshots under {os.path.dirname(RUNFILES_PATH)}")
 
-    if not gmt_paths:
-        sys.exit("No @GMT snapshots found on this share. Ask your admin to enable Shadow Copies for the share.")
+    total = 0
+    for target_date in TARGET_DATES:
+        print(f"\n== Checking for BusinessDate {target_date} ==")
+        found = False
+        fallback_date = None
+        fallback_snap = None
+        all_seen_dates: Set[str] = set()
 
-    print(f"Found {len(gmt_paths)} snapshot(s) on {SHARE_ROOT}. Scanning newest → oldest...\n")
+        for snap in snaps:
+            snap_runfiles = os.path.join(snap, "RunFiles")
+            print(f"  Checking {snap_runfiles} ...")
+            if not os.path.isdir(snap_runfiles):
+                continue
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    grand_total = 0
+            snap_dates: Set[str] = set()
+            for name in os.listdir(snap_runfiles):
+                if FILENAME_TOKEN not in name:
+                    continue
+                path = os.path.join(snap_runfiles, name)
+                snap_dates |= read_business_dates(path)
 
-    for date in TARGET_DATES:
-        print(f"== Target BusinessDate: {date} ==")
-        date_total = 0
-        for idx, gmt in enumerate(gmt_paths, start=1):
-            snap_runfiles = snapshot_runfiles_path(gmt, RUNFILES_REL)
-            print(f"  [{idx}/{len(gmt_paths)}] {snap_runfiles}")
-            copied = copy_matches_for_date_from_snapshot(snap_runfiles, date, OUT_DIR)
-            if copied:
-                for p in copied:
-                    print(f"    Copied: {p}")
-                date_total += len(copied)
-                grand_total += len(copied)
-                if STOP_AT_FIRST_SNAPSHOT_WITH_MATCHES:
-                    print("    (Stopping at first snapshot with matches for this date)")
-                    break
-        if date_total == 0:
-            print("    No matching files in any snapshot for this date.")
-        print()
+            all_seen_dates |= snap_dates
+            if target_date in snap_dates:
+                print(f"    Found exact {target_date} in {snap}")
+                copied = copy_files_for_date(snap_runfiles, target_date, OUT_DIR / target_date)
+                total += copied
+                found = True
+                break
+            else:
+                less = find_nearest_less_date(snap_dates, target_date)
+                if less and (fallback_date is None or less > fallback_date):
+                    fallback_date = less
+                    fallback_snap = snap
 
-    print(f"Done. Total files copied: {grand_total}")
-    print(f"Destination: {OUT_DIR.resolve()}")
+        if not found and fallback_date and fallback_snap:
+            print(f"    No exact match; using previous BusinessDate {fallback_date} from {fallback_snap}")
+            snap_runfiles = os.path.join(fallback_snap, "RunFiles")
+            copied = copy_files_for_date(
+                snap_runfiles,
+                fallback_date,
+                OUT_DIR / f"{target_date}_backfill_{fallback_date}"
+            )
+            total += copied
+
+    print(f"\nDone. Total files copied: {total}\nDestination: {OUT_DIR.resolve()}")
 
 if __name__ == "__main__":
     main()
