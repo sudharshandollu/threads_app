@@ -1,35 +1,25 @@
 #!/usr/bin/env python3
-# Windows-only: Copy MI_Input_ files for a target BusinessDate from VSS (Previous Versions) into a custom folder.
-# Run as Administrator.
+# SMB Previous Versions (@GMT snapshots) copier — NO ADMIN REQUIRED.
+# Copies MI_Input_ files for given BusinessDate(s) from the newest server snapshot
+# into your custom folder. Works for CSV/Parquet. Requires snapshot support on the SMB share.
 
-import subprocess, shlex, sys, shutil, os
+import subprocess, shlex, sys, os, shutil
 from pathlib import Path
-from datetime import datetime
 from typing import List, Set
 import pandas as pd
 
 # =======================
-# CONFIG (EDIT THESE)
+# CONFIG — EDIT THESE
 # =======================
-RUNFILES_DIR      = Path(r"C:\Data\ProjectA\state\foo\Runfiles")   # the live Runfiles folder to mirror path from
-TARGET_DATES      = ["2025-10-23"]                                  # list of missing BusinessDate(s), YYYY-MM-DD
-OUT_DIR           = Path(r"C:\Recovered\Runfiles")                  # your custom destination folder
-BUSINESS_DATE_COL = "BusinessDate"                                  # column name (case-insensitive)
-FILENAME_TOKEN    = "MI_Input_"                                     # only scan files containing this token
-DRIVE_LETTER      = "C:"                                            # drive containing RUNFILES_DIR (e.g., "C:")
-SCAN_FILE_TYPES   = {".csv", ".parquet"}                            # which file types to consider
-STOP_AT_FIRST_SNAPSHOT_WITH_MATCHES = True                          # True = copy from newest snapshot only
-
+SHARE_ROOT       = r"\\SERVER\Share"                      # e.g. r"\\filesrv01\deptdata"
+RUNFILES_REL     = r"ProjectA\state\foo\Runfiles"         # path inside the share to Runfiles
+TARGET_DATES     = ["2025-10-23"]                         # missing BusinessDate(s), YYYY-MM-DD
+OUT_DIR          = Path(r"C:\Recovered\Runfiles")         # your custom destination
+FILENAME_TOKEN   = "MI_Input_"                             # only consider files containing this token
+BUSINESS_DATE_COL= "BusinessDate"                          # case-insensitive
+SCAN_FILE_TYPES  = {".csv", ".parquet"}                    # extend if needed
+STOP_AT_FIRST_SNAPSHOT_WITH_MATCHES = True                 # True = only the newest snapshot per date
 # =======================
-# UTILITIES
-# =======================
-
-def _run_ps(cmd: str) -> str:
-    proc = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
-                          capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"PowerShell failed: {cmd}")
-    return proc.stdout
 
 def _run_cmd(cmd: str) -> str:
     proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True)
@@ -37,86 +27,47 @@ def _run_cmd(cmd: str) -> str:
         raise RuntimeError(proc.stderr.strip() or f"Command failed: {cmd}")
     return proc.stdout
 
-def list_shadow_roots_for_drive(drive_letter: str) -> List[str]:
+def list_gmt_snapshots(share_root: str) -> List[str]:
     """
-    Returns a list of Device roots like:
-      \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy42\
-    for the specified drive (e.g., "C:").
-    Newest first.
+    Returns the list of @GMT-YYYY.MM.DD-HH.MM.SS snapshot names (newest → oldest)
+    from the SMB share root. Works without admin if server exposes snapshots.
     """
-    out = _run_cmd("vssadmin list shadows")
-    # We’ll collect Shadow Copy Volume lines and filter by drive using exposed OriginatingMachine/Volume info
-    # Simpler approach: gather all Device paths in order, newest first (vssadmin prints newest first).
-    lines = [l.strip() for l in out.splitlines()]
-    roots = []
-    cur_device = None
-    cur_vol = None
-    for line in lines:
-        if line.startswith("Shadow Copy Volume:"):
-            # E.g., Shadow Copy Volume: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy42
-            part = line.split(":", 1)[1].strip()
-            cur_device = part if part.endswith("\\") else part + "\\"
-        elif line.startswith("Original Volume:"):
-            # E.g., Original Volume: (C:)\\?\Volume{...}\
-            cur_vol = line
-            if cur_device:
-                if f"({drive_letter.upper()})" in cur_vol.upper():
-                    roots.append(cur_device)
-                cur_device = None
-                cur_vol = None
+    # Use cmd /c dir so Windows resolves the virtual @GMT-* dirs on the share
+    pattern = fr'{share_root}\@GMT-*'
+    out = _run_cmd(f'cmd /c dir /b "{pattern}"')
+    # Each line is a full UNC path like \\SERVER\Share\@GMT-2025.10.23-12.00.03
+    lines = [l.strip() for l in out.splitlines() if l.strip()]
+    # Sort descending by their string (works because format is lexicographically sortable by date-time)
+    lines.sort(reverse=True)
+    return lines
 
-    # vssadmin prints newest first already; keep as-is
-    return roots
-
-def snapshot_path_for(runfiles_dir: Path, shadow_root: str, drive_letter: str) -> Path:
-    """
-    Map a live path like C:\Data\X\Runfiles to a snapshot path like:
-      \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy42\Data\X\Runfiles
-    """
-    drive = (drive_letter.upper() + "\\")
-    p_str = str(runfiles_dir)
-    if not p_str.upper().startswith(drive):
-        raise ValueError(f"RUNFILES_DIR is not on {drive_letter}: {runfiles_dir}")
-    rel = p_str[len(drive):]  # strip 'C:\'
-    return Path(shadow_root) / rel
+def snapshot_runfiles_path(gmt_path: str, runfiles_rel: str) -> Path:
+    return Path(gmt_path) / runfiles_rel
 
 def read_business_dates_from_file(p: Path, want_col_lower: str) -> Set[str]:
-    suffix = p.suffix.lower()
     dates: Set[str] = set()
     try:
-        if suffix == ".csv":
-            try:
-                df = pd.read_csv(p, dtype=str, low_memory=False)
-            except Exception:
-                return dates
-        elif suffix == ".parquet":
-            try:
-                df = pd.read_parquet(p)
-            except Exception:
-                return dates
+        if p.suffix.lower() == ".csv":
+            df = pd.read_csv(p, dtype=str, low_memory=False)
+        elif p.suffix.lower() == ".parquet":
+            df = pd.read_parquet(p)
         else:
             return dates
-
-        # Case-insensitive column
         cols_lower = {c.lower(): c for c in df.columns}
         if want_col_lower not in cols_lower:
             return dates
-
         col = cols_lower[want_col_lower]
         s = pd.to_datetime(df[col], errors="coerce").dropna()
         for dt in s.dt.to_pydatetime():
             dates.add(dt.strftime("%Y-%m-%d"))
-        return dates
     except Exception:
-        return dates
+        # Swallow read errors; just treat as no dates.
+        pass
+    return dates
 
-def ensure_dir(p: Path):
-    p.mkdir(parents=True, exist_ok=True)
-
-def copy_matches_from_snapshot_for_date(snapshot_runfiles: Path, target_date: str, out_dir: Path) -> List[Path]:
+def copy_matches_for_date_from_snapshot(snapshot_runfiles: Path, target_date: str, out_dir: Path) -> List[Path]:
     """
-    Scan snapshot Runfiles; copy files whose BusinessDate includes target_date into out_dir.
-    Returns list of copied paths.
+    Scan snapshot Runfiles; copy files whose BusinessDate contains target_date into out_dir/target_date.
     """
     copied: List[Path] = []
     if not snapshot_runfiles.is_dir():
@@ -132,68 +83,62 @@ def copy_matches_from_snapshot_for_date(snapshot_runfiles: Path, target_date: st
 
         dates_in_file = read_business_dates_from_file(f, BUSINESS_DATE_COL.lower())
         if target_date in dates_in_file:
-            ensure_dir(out_dir)
-            dest = out_dir / f.name
-            # If name clash, add suffix with snapshot id or date
+            dest_dir = out_dir / target_date
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / f.name
+            # Avoid overwrite collisions
             if dest.exists():
-                stem, suffix = os.path.splitext(f.name)
-                alt = out_dir / f"{stem}__from_snapshot__{target_date}{suffix}"
-                shutil.copy2(f, alt)
-                copied.append(alt)
-            else:
-                shutil.copy2(f, dest)
-                copied.append(dest)
+                stem, suf = os.path.splitext(f.name)
+                dest = dest_dir / f"{stem}__from_{snapshot_runfiles.parent.name}{suf}"
+            shutil.copy2(f, dest)
+            copied.append(dest)
     return copied
 
-# =======================
-# MAIN
-# =======================
-
 def main():
-    if not RUNFILES_DIR.exists():
-        print(f"ERROR: RUNFILES_DIR not found: {RUNFILES_DIR}", file=sys.stderr)
-        sys.exit(2)
-
+    # Validate share path
+    live_runfiles = Path(SHARE_ROOT) / RUNFILES_REL
+    print(f"Live path: {live_runfiles}")
+    if not Path(SHARE_ROOT).exists():
+        sys.exit(f"ERROR: Share root not accessible: {SHARE_ROOT}")
+    # Listing snapshots
     try:
-        shadow_roots = list_shadow_roots_for_drive(DRIVE_LETTER)
-    except Exception as e:
-        print(f"ERROR: Could not list shadow copies. Are you running as Administrator? {e}", file=sys.stderr)
-        sys.exit(2)
+        gmt_paths = list_gmt_snapshots(SHARE_ROOT)
+    except RuntimeError as e:
+        sys.exit(
+            f"ERROR: Could not enumerate @GMT snapshots. Details: {e}\n"
+            f"- Ensure the file server has Shadow Copies enabled for this share.\n"
+            f"- You must point SHARE_ROOT at the **share root** (e.g., \\\\SERVER\\Share)."
+        )
 
-    if not shadow_roots:
-        print("No Volume Shadow Copies found for this drive. Enable System Protection / Previous Versions.", file=sys.stderr)
-        sys.exit(1)
+    if not gmt_paths:
+        sys.exit("No @GMT snapshots found on this share. Ask your admin to enable Shadow Copies for the share.")
 
-    print(f"Found {len(shadow_roots)} snapshot(s). Scanning newest → oldest…\n")
+    print(f"Found {len(gmt_paths)} snapshot(s) on {SHARE_ROOT}. Scanning newest → oldest...\n")
 
-    total_copied = 0
-    for target_date in TARGET_DATES:
-        print(f"== Target BusinessDate: {target_date} ==")
-        date_copied = 0
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    grand_total = 0
 
-        for idx, root in enumerate(shadow_roots, start=1):
-            snap_path = snapshot_path_for(RUNFILES_DIR, root, DRIVE_LETTER)
-            print(f"  [{idx}/{len(shadow_roots)}] Snapshot path: {snap_path}")
-            copied = copy_matches_from_snapshot_for_date(
-                snap_path,
-                target_date,
-                OUT_DIR / target_date  # put files per-date under your custom folder
-            )
+    for date in TARGET_DATES:
+        print(f"== Target BusinessDate: {date} ==")
+        date_total = 0
+        for idx, gmt in enumerate(gmt_paths, start=1):
+            snap_runfiles = snapshot_runfiles_path(gmt, RUNFILES_REL)
+            print(f"  [{idx}/{len(gmt_paths)}] {snap_runfiles}")
+            copied = copy_matches_for_date_from_snapshot(snap_runfiles, date, OUT_DIR)
             if copied:
-                for c in copied:
-                    print(f"    Copied: {c}")
-                date_copied += len(copied)
-                total_copied += len(copied)
+                for p in copied:
+                    print(f"    Copied: {p}")
+                date_total += len(copied)
+                grand_total += len(copied)
                 if STOP_AT_FIRST_SNAPSHOT_WITH_MATCHES:
                     print("    (Stopping at first snapshot with matches for this date)")
                     break
-
-        if date_copied == 0:
-            print("    No matching files found in any snapshot for this date.")
+        if date_total == 0:
+            print("    No matching files in any snapshot for this date.")
         print()
 
-    print(f"Done. Total files copied: {total_copied}")
-    print(f"Destination root: {OUT_DIR.resolve()}")
+    print(f"Done. Total files copied: {grand_total}")
+    print(f"Destination: {OUT_DIR.resolve()}")
 
 if __name__ == "__main__":
     main()
