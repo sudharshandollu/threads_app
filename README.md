@@ -1,246 +1,199 @@
 #!/usr/bin/env python3
-"""
-Scan each <project>/<state|message>/<child>/Runfiles for files whose names contain "MI_Input_".
-Open those files, read the BusinessDate column, and compute missing WEEKDAY dates between
-START_DATE and END_DATE (inclusive). Prints per-path results and optionally writes a CSV.
+# Windows-only: Copy MI_Input_ files for a target BusinessDate from VSS (Previous Versions) into a custom folder.
+# Run as Administrator.
 
-Output CSV columns (same structure as before):
-  Project, Target, ChildFolder, RunfilesPath, RunfilesExists,
-  PresentCount(Weekdays), MissingCount(Weekdays), MissingDates(Weekdays)
-
-Notes:
-- Only Monday–Friday dates are considered "expected".
-- A Runfiles folder missing => all expected weekdays are missing.
-- If a file lacks BusinessDate, it's ignored (with a warning). If all files lack it, all dates are missing.
-- Supports CSV and Parquet out-of-the-box. Excel is best avoided (install openpyxl if needed).
-"""
-
-from __future__ import annotations
+import subprocess, shlex, sys, shutil, os
 from pathlib import Path
-from datetime import datetime, timedelta
-import re
-import csv
-import sys
-from typing import Set, List
-
+from datetime import datetime
+from typing import List, Set
 import pandas as pd
 
-# =========================
-# HARD-CODED CONFIG
-# =========================
-ROOT            = Path(r"/path/to/root")  # <- CHANGE ME
-START_DATE_STR  = "2025-10-01"            # <- inclusive
-END_DATE_STR    = "2025-10-28"            # <- inclusive
-TARGETS         = ["state", "message"]    # subfolders to check
-RUNFILES_NAME   = "Runfiles"
-PREFIX_TOKEN    = "MI_Input_"             # file name must CONTAIN this token
-BUSINESS_DATE_COL = "BusinessDate"        # column to read inside MI_Input files (case-insensitive)
-CSV_OUT         = None                    # e.g., Path("missing_weekdays_report.csv") or None to skip
-# =========================
+# =======================
+# CONFIG (EDIT THESE)
+# =======================
+RUNFILES_DIR      = Path(r"C:\Data\ProjectA\state\foo\Runfiles")   # the live Runfiles folder to mirror path from
+TARGET_DATES      = ["2025-10-23"]                                  # list of missing BusinessDate(s), YYYY-MM-DD
+OUT_DIR           = Path(r"C:\Recovered\Runfiles")                  # your custom destination folder
+BUSINESS_DATE_COL = "BusinessDate"                                  # column name (case-insensitive)
+FILENAME_TOKEN    = "MI_Input_"                                     # only scan files containing this token
+DRIVE_LETTER      = "C:"                                            # drive containing RUNFILES_DIR (e.g., "C:")
+SCAN_FILE_TYPES   = {".csv", ".parquet"}                            # which file types to consider
+STOP_AT_FIRST_SNAPSHOT_WITH_MATCHES = True                          # True = copy from newest snapshot only
 
-DATE_PREFIX_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})')  # not required anymore, left for reference
+# =======================
+# UTILITIES
+# =======================
 
-def daterange(start: datetime, end: datetime):
-    d = start
-    one = timedelta(days=1)
-    while d <= end:
-        yield d
-        d += one
+def _run_ps(cmd: str) -> str:
+    proc = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"PowerShell failed: {cmd}")
+    return proc.stdout
 
-def is_weekday(d: datetime) -> bool:
-    # Monday=0 .. Sunday=6
-    return d.weekday() < 5
+def _run_cmd(cmd: str) -> str:
+    proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"Command failed: {cmd}")
+    return proc.stdout
 
-def normalize_colnames(cols):
-    return {c: c.lower() for c in cols}
+def list_shadow_roots_for_drive(drive_letter: str) -> List[str]:
+    """
+    Returns a list of Device roots like:
+      \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy42\
+    for the specified drive (e.g., "C:").
+    Newest first.
+    """
+    out = _run_cmd("vssadmin list shadows")
+    # We’ll collect Shadow Copy Volume lines and filter by drive using exposed OriginatingMachine/Volume info
+    # Simpler approach: gather all Device paths in order, newest first (vssadmin prints newest first).
+    lines = [l.strip() for l in out.splitlines()]
+    roots = []
+    cur_device = None
+    cur_vol = None
+    for line in lines:
+        if line.startswith("Shadow Copy Volume:"):
+            # E.g., Shadow Copy Volume: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy42
+            part = line.split(":", 1)[1].strip()
+            cur_device = part if part.endswith("\\") else part + "\\"
+        elif line.startswith("Original Volume:"):
+            # E.g., Original Volume: (C:)\\?\Volume{...}\
+            cur_vol = line
+            if cur_device:
+                if f"({drive_letter.upper()})" in cur_vol.upper():
+                    roots.append(cur_device)
+                cur_device = None
+                cur_vol = None
+
+    # vssadmin prints newest first already; keep as-is
+    return roots
+
+def snapshot_path_for(runfiles_dir: Path, shadow_root: str, drive_letter: str) -> Path:
+    """
+    Map a live path like C:\Data\X\Runfiles to a snapshot path like:
+      \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy42\Data\X\Runfiles
+    """
+    drive = (drive_letter.upper() + "\\")
+    p_str = str(runfiles_dir)
+    if not p_str.upper().startswith(drive):
+        raise ValueError(f"RUNFILES_DIR is not on {drive_letter}: {runfiles_dir}")
+    rel = p_str[len(drive):]  # strip 'C:\'
+    return Path(shadow_root) / rel
 
 def read_business_dates_from_file(p: Path, want_col_lower: str) -> Set[str]:
-    """
-    Read BusinessDate values from a single file.
-    Returns a set of 'YYYY-MM-DD' strings observed in the file.
-    Supports: .csv, .parquet (and tries .xlsx if openpyxl available).
-    Any parsing errors or missing column => safely ignored with a warning.
-    """
-    present: Set[str] = set()
     suffix = p.suffix.lower()
-
+    dates: Set[str] = set()
     try:
-        if suffix in (".csv", ".txt"):
-            # Try reading only the needed column, but if it fails, fallback.
+        if suffix == ".csv":
             try:
-                df = pd.read_csv(p, usecols=[BUSINESS_DATE_COL], dtype=str)
-            except Exception:
                 df = pd.read_csv(p, dtype=str, low_memory=False)
-        elif suffix in (".parquet",):
-            try:
-                df = pd.read_parquet(p, columns=[BUSINESS_DATE_COL])
             except Exception:
-                df = pd.read_parquet(p)
-        elif suffix in (".xlsx", ".xls"):
+                return dates
+        elif suffix == ".parquet":
             try:
-                df = pd.read_excel(p, dtype=str)
-            except Exception as e:
-                print(f"[WARN] Failed to read Excel {p}: {e}", file=sys.stderr)
-                return present
+                df = pd.read_parquet(p)
+            except Exception:
+                return dates
         else:
-            # Unsupported type; skip quietly
-            return present
+            return dates
 
-        # Case-insensitive pick of BusinessDate
+        # Case-insensitive column
         cols_lower = {c.lower(): c for c in df.columns}
         if want_col_lower not in cols_lower:
-            print(f"[WARN] {p.name} missing '{BUSINESS_DATE_COL}' column; skipping.", file=sys.stderr)
-            return present
+            return dates
 
-        colname = cols_lower[want_col_lower]
-        # Parse to datetime safely, drop invalids
-        s = pd.to_datetime(df[colname], errors="coerce", utc=False).dropna()
-        # Normalize to 'YYYY-MM-DD' strings
-        present = set(dt.strftime("%Y-%m-%d") for dt in s.dt.to_pydatetime())
-        return present
+        col = cols_lower[want_col_lower]
+        s = pd.to_datetime(df[col], errors="coerce").dropna()
+        for dt in s.dt.to_pydatetime():
+            dates.add(dt.strftime("%Y-%m-%d"))
+        return dates
+    except Exception:
+        return dates
 
-    except Exception as e:
-        print(f"[WARN] Failed to read {p}: {e}", file=sys.stderr)
-        return present
+def ensure_dir(p: Path):
+    p.mkdir(parents=True, exist_ok=True)
 
-def collect_present_dates_from_runfiles(runfiles_dir: Path) -> Set[str]:
+def copy_matches_from_snapshot_for_date(snapshot_runfiles: Path, target_date: str, out_dir: Path) -> List[Path]:
     """
-    Iterate all files in Runfiles whose names contain PREFIX_TOKEN.
-    Union all BusinessDate values found across files.
+    Scan snapshot Runfiles; copy files whose BusinessDate includes target_date into out_dir.
+    Returns list of copied paths.
     """
-    present: Set[str] = set()
-    if not runfiles_dir.is_dir():
-        return present
+    copied: List[Path] = []
+    if not snapshot_runfiles.is_dir():
+        return copied
 
-    for p in runfiles_dir.iterdir():
-        if p.is_file() and (PREFIX_TOKEN in p.name):
-            dates_in_file = read_business_dates_from_file(p, BUSINESS_DATE_COL.lower())
-            present |= dates_in_file
+    for f in snapshot_runfiles.iterdir():
+        if not f.is_file():
+            continue
+        if FILENAME_TOKEN not in f.name:
+            continue
+        if f.suffix.lower() not in SCAN_FILE_TYPES:
+            continue
 
-    return present
+        dates_in_file = read_business_dates_from_file(f, BUSINESS_DATE_COL.lower())
+        if target_date in dates_in_file:
+            ensure_dir(out_dir)
+            dest = out_dir / f.name
+            # If name clash, add suffix with snapshot id or date
+            if dest.exists():
+                stem, suffix = os.path.splitext(f.name)
+                alt = out_dir / f"{stem}__from_snapshot__{target_date}{suffix}"
+                shutil.copy2(f, alt)
+                copied.append(alt)
+            else:
+                shutil.copy2(f, dest)
+                copied.append(dest)
+    return copied
+
+# =======================
+# MAIN
+# =======================
 
 def main():
-    start_dt = datetime.strptime(START_DATE_STR, "%Y-%m-%d")
-    end_dt   = datetime.strptime(END_DATE_STR,   "%Y-%m-%d")
+    if not RUNFILES_DIR.exists():
+        print(f"ERROR: RUNFILES_DIR not found: {RUNFILES_DIR}", file=sys.stderr)
+        sys.exit(2)
 
-    if not ROOT.is_dir():
-        raise SystemExit(f"ERROR: Root not found or not a directory: {ROOT}")
+    try:
+        shadow_roots = list_shadow_roots_for_drive(DRIVE_LETTER)
+    except Exception as e:
+        print(f"ERROR: Could not list shadow copies. Are you running as Administrator? {e}", file=sys.stderr)
+        sys.exit(2)
 
-    # Only expected weekdays
-    expected_dates: List[str] = [d.strftime("%Y-%m-%d") for d in daterange(start_dt, end_dt) if is_weekday(d)]
-    expected_set = set(expected_dates)
+    if not shadow_roots:
+        print("No Volume Shadow Copies found for this drive. Enable System Protection / Previous Versions.", file=sys.stderr)
+        sys.exit(1)
 
-    print(f"\nScanning: {ROOT}")
-    print(f"Targets: {TARGETS}")
-    print(f"Date range (weekdays only): {START_DATE_STR} .. {END_DATE_STR} (inclusive)")
-    print(f"Runfiles folder: {RUNFILES_NAME}")
-    print(f"Match token in filename: {PREFIX_TOKEN}")
-    print(f"Reading column: {BUSINESS_DATE_COL}\n")
+    print(f"Found {len(shadow_roots)} snapshot(s). Scanning newest → oldest…\n")
 
-    projects = sorted([p for p in ROOT.iterdir() if p.is_dir()], key=lambda x: x.name)
-    if not projects:
-        print("No project folders under root. Done.")
-        return
+    total_copied = 0
+    for target_date in TARGET_DATES:
+        print(f"== Target BusinessDate: {target_date} ==")
+        date_copied = 0
 
-    rows_for_csv = []
-    total_expected = 0
-    total_missing  = 0
-    runfiles_missing_rows = []  # list of (full_path, missing_count, missing_dates_str)
+        for idx, root in enumerate(shadow_roots, start=1):
+            snap_path = snapshot_path_for(RUNFILES_DIR, root, DRIVE_LETTER)
+            print(f"  [{idx}/{len(shadow_roots)}] Snapshot path: {snap_path}")
+            copied = copy_matches_from_snapshot_for_date(
+                snap_path,
+                target_date,
+                OUT_DIR / target_date  # put files per-date under your custom folder
+            )
+            if copied:
+                for c in copied:
+                    print(f"    Copied: {c}")
+                date_copied += len(copied)
+                total_copied += len(copied)
+                if STOP_AT_FIRST_SNAPSHOT_WITH_MATCHES:
+                    print("    (Stopping at first snapshot with matches for this date)")
+                    break
 
-    for project in projects:
-        project_name = project.name
-        for target in TARGETS:
-            target_dir = project / target
-            if not target_dir.is_dir():
-                print(f"[WARN] Missing target dir: {target_dir}")
-                continue
+        if date_copied == 0:
+            print("    No matching files found in any snapshot for this date.")
+        print()
 
-            child_dirs = sorted([c for c in target_dir.iterdir() if c.is_dir()], key=lambda x: x.name)
-            if not child_dirs:
-                print(f"[WARN] No child folders inside: {target_dir}")
-                continue
-
-            for child in child_dirs:
-                run_dir = child / RUNFILES_NAME
-                run_dir_path = run_dir.absolute()
-                runfiles_exists = run_dir.is_dir()
-
-                if runfiles_exists:
-                    present_all = collect_present_dates_from_runfiles(run_dir)
-                    # Only count dates falling within expected weekdays
-                    present_weekdays = present_all & expected_set
-                    missing = [d for d in expected_dates if d not in present_weekdays]
-                else:
-                    present_weekdays = set()
-                    missing = expected_dates[:]
-
-                total_expected += len(expected_dates)
-                total_missing  += len(missing)
-
-                print(f"Path: {run_dir_path}")
-                print(f"  Runfiles exists: {'YES' if runfiles_exists else 'NO'}")
-                print(f"  Present BusinessDate (weekday range): {len(present_weekdays)} / {len(expected_dates)}")
-
-                if missing:
-                    preview = ", ".join(missing[:10])
-                    more = f" (+{len(missing)-10} more)" if len(missing) > 10 else ""
-                    print(f"  TOTAL MISSING (weekdays): {len(missing)}")
-                    print(f"  MISSING DATES (weekdays): {preview}{more}")
-                else:
-                    print("  TOTAL MISSING (weekdays): 0")
-                    print("  MISSING DATES (weekdays): None")
-                print()
-
-                rows_for_csv.append((
-                    project_name,
-                    target,
-                    child.name,
-                    str(run_dir_path),
-                    'YES' if runfiles_exists else 'NO',
-                    len(present_weekdays),
-                    len(missing),
-                    ";".join(missing)
-                ))
-
-                if not runfiles_exists:
-                    runfiles_missing_rows.append((
-                        str(run_dir_path),
-                        len(missing),
-                        ";".join(missing)
-                    ))
-
-    coverage = 0.0 if total_expected == 0 else (1 - total_missing / total_expected) * 100
-    print("====== SUMMARY (Weekdays Only, from BusinessDate) ======")
-    print(f"Expected weekday date-slots overall: {total_expected}")
-    print(f"Missing overall:                    {total_missing}")
-    print(f"Coverage:                           {coverage:.2f}%")
-
-    if runfiles_missing_rows:
-        print("\n====== RUNFILES MISSING SUMMARY ======")
-        for full_path, miss_count, miss_dates in runfiles_missing_rows:
-            dates_list = miss_dates.split(";") if miss_dates else []
-            preview = ", ".join(dates_list[:10])
-            more = f" (+{len(dates_list)-10} more)" if len(dates_list) > 10 else ""
-            print(f"{full_path}")
-            print(f"  TOTAL MISSING (weekdays): {miss_count}")
-            print(f"  MISSING DATES (weekdays): {preview}{more}\n")
-
-    if CSV_OUT:
-        CSV_OUT.parent.mkdir(parents=True, exist_ok=True)
-        with open(CSV_OUT, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow([
-                "Project",
-                "Target",
-                "ChildFolder",
-                "RunfilesPath",
-                "RunfilesExists",
-                "PresentCount(Weekdays)",
-                "MissingCount(Weekdays)",
-                "MissingDates(Weekdays)"
-            ])
-            w.writerows(rows_for_csv)
-        print(f"\nCSV written: {CSV_OUT}")
+    print(f"Done. Total files copied: {total_copied}")
+    print(f"Destination root: {OUT_DIR.resolve()}")
 
 if __name__ == "__main__":
     main()
