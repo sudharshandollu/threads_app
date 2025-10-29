@@ -1,32 +1,25 @@
-import ast
-import json
-import pandas as pd
-
-def parse_str_to_dict(val):
+def dicts_to_md_table(dict_list):
     """
-    Convert a string like '{"generic": {"key": "value"}}' into a dict.
-    Handles both JSON and Python literal formats safely.
-    Returns the original value if not convertible.
+    Convert list of dicts with same structure into a compact markdown table string.
+    Example:
+        [{"col1": "a", "col2": "b"}, {"col1": "x", "col2": "y"}]
+        ->
+        "| col1 | col2 |\n| a | b |\n| x | y |"
     """
-    if not isinstance(val, str):
-        return val
-    
-    text = val.strip()
-    if not text:
-        return val
-    
-    # Fast check — must start with { or [
-    if not (text.startswith("{") or text.startswith("[")):
-        return val
+    if not dict_list:
+        return ""
 
-    # Try JSON parse first
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+    # Preserve column order of first dict
+    cols = list(dict_list[0].keys())
 
-    # Fallback: Python literal eval
-    try:
-        return ast.literal_eval(text)
-    except Exception:
-        return val
+    # Header
+    header = "|" + "|".join(cols) + "|"
+
+    # Rows
+    rows = []
+    for d in dict_list:
+        row = "|" + "|".join(str(d.get(c, "")).replace("\n", " ") for c in cols) + "|"
+        rows.append(row)
+
+    # Combine all lines with \n
+    return "\n".join([header] + rows)
