@@ -1,116 +1,95 @@
 #!/usr/bin/env python3
 """
-Build an inventory of all files under a source path and classify control type.
+Scan a source directory recursively and build an Excel inventory of files
+with classified control types.
 
-Rules (checked in order):
-1) If filename contains 'comp' (case-insensitive) -> 'completeness'
-2) Else if Excel file (.xlsx/.xlsm) contains a sheet named 'QARules' -> 'QA'
-3) Else -> 'preprocess'
-
-Usage:
-  python build_control_inventory.py --src /path/to/root --out file_inventory.xlsx
+Control Type Rules:
+1) If filename contains 'comp' (case-insensitive) → 'completeness'
+2) Else if Excel file (.xlsx/.xlsm) has a sheet named 'QARules' → 'QA'
+3) Else → 'preprocess'
 """
 
-import argparse
 import os
 from pathlib import Path
-import sys
-import traceback
 import pandas as pd
+import traceback
 
-# Try to import openpyxl for Excel sheet detection
+# --------------------------------------------------------------------
+# Hardcoded paths — update these
+# --------------------------------------------------------------------
+SRC_DIR = Path(r"D:\Projects\DataControls")      # Change this to your root directory
+OUT_FILE = Path(r"D:\Projects\file_inventory.xlsx")  # Output Excel file
+
+# --------------------------------------------------------------------
+# Setup
+# --------------------------------------------------------------------
+EXCEL_EXTS = {".xlsx", ".xlsm"}
+
 try:
-    import openpyxl  # noqa: F401
+    import openpyxl  # noqa
     HAS_OPENPYXL = True
 except Exception:
     HAS_OPENPYXL = False
 
-EXCEL_EXTS = {".xlsx", ".xlsm"}  # keep to formats openpyxl handles reliably
-
 
 def has_qarules_sheet(xl_path: Path) -> bool:
-    """Return True if the Excel file contains a sheet named exactly 'QARules' (case-sensitive by default).
-       Skips temporary files like '~$foo.xlsx'. Safely handles errors."""
-    if not HAS_OPENPYXL:
-        return False
-    name = xl_path.name
-    if name.startswith("~$"):
+    """Check if Excel file contains sheet 'QARules'."""
+    if not HAS_OPENPYXL or xl_path.name.startswith("~$"):
         return False
     try:
-        # Read workbook sheet names without loading entire data
         with pd.ExcelFile(xl_path, engine="openpyxl") as xf:
-            # Match exact sheet name 'QARules'; if you want case-insensitive, lower() both sides.
             return "QARules" in xf.sheet_names
     except Exception:
-        # Corrupt or password-protected file, or not a real Excel -> treat as not having QARules
         return False
 
 
 def control_type_for_file(path: Path) -> str:
-    fname_lower = path.name.lower()
-
-    # Rule 1: filename has 'comp'
-    if "comp" in fname_lower:
+    """Determine control type for a given file path."""
+    name_lower = path.name.lower()
+    if "comp" in name_lower:
         return "completeness"
-
-    # Rule 2: Excel with sheet 'QARules'
-    if path.suffix.lower() in EXCEL_EXTS:
-        if has_qarules_sheet(path):
-            return "QA"
-
-    # Rule 3: default
+    if path.suffix.lower() in EXCEL_EXTS and has_qarules_sheet(path):
+        return "QA"
     return "preprocess"
 
 
-def build_inventory(src: Path):
+def build_inventory(src: Path) -> pd.DataFrame:
+    """Walk directory tree and collect file metadata."""
     records = []
-    for root, dirs, files in os.walk(src):
-        for f in files:
-            fp = Path(root) / f
+    for root, _, files in os.walk(src):
+        for file in files:
+            fp = Path(root) / file
             try:
-                ctype = control_type_for_file(fp)
+                ctrl_type = control_type_for_file(fp)
                 records.append({
-                    "file_path": str(fp.as_posix()),
+                    "file_path": str(fp),
                     "file_name": fp.name,
-                    "ext": fp.suffix.lower(),
-                    "control_type": ctype
+                    "extension": fp.suffix.lower(),
+                    "control_type": ctrl_type
                 })
             except Exception as e:
-                # Record the error but keep going
                 records.append({
-                    "file_path": str(fp.as_posix()),
+                    "file_path": str(fp),
                     "file_name": fp.name,
-                    "ext": fp.suffix.lower(),
+                    "extension": fp.suffix.lower(),
                     "control_type": "ERROR",
                     "error": f"{type(e).__name__}: {e}"
                 })
     df = pd.DataFrame(records)
-    # Stable ordering: by control_type then path
-    df = df.sort_values(["control_type", "file_path"], kind="mergesort").reset_index(drop=True)
-    return df
+    return df.sort_values(["control_type", "file_path"], kind="mergesort").reset_index(drop=True)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Create Excel inventory of files with control types.")
-    parser.add_argument("--src", required=True, type=Path, help="Root folder to scan")
-    parser.add_argument("--out", default="file_inventory.xlsx", type=Path, help="Output Excel file path")
-    args = parser.parse_args()
-
     try:
-        if not args.src.exists() or not args.src.is_dir():
-            print(f"[ERROR] Source path does not exist or is not a directory: {args.src}", file=sys.stderr)
-            sys.exit(2)
-
-        df = build_inventory(args.src)
-
-        # Write to Excel
-        # Use engine openpyxl for broad compatibility
-        with pd.ExcelWriter(args.out, engine="openpyxl") as writer:
+        if not SRC_DIR.exists() or not SRC_DIR.is_dir():
+            print(f"[ERROR] Source path invalid: {SRC_DIR}")
+            return
+        df = build_inventory(SRC_DIR)
+        with pd.ExcelWriter(OUT_FILE, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Inventory")
-        print(f"[OK] Wrote {len(df):,} rows to {args.out}")
+        print(f"[OK] Inventory written to {OUT_FILE} ({len(df)} rows)")
     except Exception:
         traceback.print_exc()
-        sys.exit(1)
 
 
 if __name__ == "__main__":
