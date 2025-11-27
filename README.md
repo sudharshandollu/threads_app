@@ -1,17 +1,18 @@
-<!doctype html>
-<html>
-<body>
-<script>
-  const ws = new WebSocket("ws://localhost:8000/ws");
+const CONTEXT = "You are a helpful assistant that explains things step by step.";
+const USER_QUERY = "how to open vscode";
 
-  ws.onopen = () => {
-    console.log("OPEN");
-    ws.send("hello");
-  };
-
-  ws.onmessage = (e) => console.log("MSG:", e.data);
-  ws.onerror = (e) => console.log("ERR:", e);
-  ws.onclose = (e) => console.log("CLOSE:", e.code, e.reason);
-</script>
-</body>
-</html>
+const data = {
+  model: "gpt-5",
+  messages: [
+    {
+      role: "system",      // or "developer" if your org prefers that role
+      content: CONTEXT     // ✅ your context goes here
+    },
+    {
+      role: "user",
+      content: USER_QUERY  // ✅ user’s actual question
+    }
+  ],
+  max_completion_tokens: 100,
+  user: USER_ID           // fine to keep this for auditing / rate-limiting
+};
