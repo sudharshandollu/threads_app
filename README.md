@@ -1,125 +1,60 @@
-async def subscribe_to_task(self, websocket: WebSocket, task_id: str) -> bool:
-    if websocket not in self.active_connections:
-        logging.warning("⚠️ Cannot subscribe: WebSocket not in active connections")
-        return False
+def build_html_email(params, status):
+    is_success = status.lower() == "success"
 
-    # --- in-memory bookkeeping (keep this) ---
-    if task_id not in self.task_subscriptions:
-        self.task_subscriptions[task_id] = set()
+    title = "Deployment Successful" if is_success else "Deployment Failed"
+    title_color = "#2e7d32" if is_success else "#c62828"
+    status_color = "green" if is_success else "red"
 
-    self.task_subscriptions[task_id].add(websocket)
-    self.active_connections[websocket]["subscriptions"].add(task_id)
+    error_section = ""
+    if not is_success:
+        error_section = f"""
+        <h4>Error Summary</h4>
+        <p style="color: {title_color};">{params.get('error_summary')}</p>
 
-    key = (websocket, task_id)
+        <h4>Error Details</h4>
+        <pre style="background: #f5f5f5; padding: 10px; border: 1px solid #ccc;">
+{params.get('error_details')}
+        </pre>
+        """
 
-    # ✅ STRICT: Prevent duplicate pollers for same ws+task
-    if key in self.subscription_pollers:
-        logging.info(f"✅ Poller already running for task {task_id} on this WS")
-        return True
+    html = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; color: #333;">
+        <h2 style="color: {title_color};">{title}</h2>
 
-    async def poll_task_status():
-        last_payload = None
-        logging.info(f"▶️ POLLER STARTED | ws={id(websocket)} | task={task_id}")
+        <p>Hello <strong>{params.get('user_name')}</strong>,</p>
 
-        try:
-            while True:
-                # stop if ws disconnected or unsubscribed
-                if websocket not in self.active_connections:
-                    break
-                if task_id not in self.active_connections[websocket]["subscriptions"]:
-                    break
+        <p>
+            The auto configuration deployment has
+            <strong>{'completed successfully' if is_success else 'failed'}</strong>.
+        </p>
 
-                data = read_task_status(task_id)
+        <table cellpadding="8" cellspacing="0" border="1" style="border-collapse: collapse;">
+            <tr><td><strong>Configuration Name</strong></td><td>{params.get('config_name')}</td></tr>
+            <tr><td><strong>Environment</strong></td><td>{params.get('environment')}</td></tr>
+            <tr><td><strong>Deployment ID</strong></td><td>{params.get('deployment_id')}</td></tr>
+            <tr><td><strong>Start Time</strong></td><td>{params.get('start_time')}</td></tr>
+            <tr><td><strong>{'Completion Time' if is_success else 'Failure Time'}</strong></td>
+                <td>{params.get('end_time') if is_success else params.get('failure_time')}</td>
+            </tr>
+            <tr>
+                <td><strong>Status</strong></td>
+                <td style="color: {status_color};"><strong>{status.upper()}</strong></td>
+            </tr>
+        </table>
 
-                if data is None:
-                    await websocket.send_json({
-                        "type": "task_not_found",
-                        "task_id": task_id,
-                    })
-                    break
+        {error_section}
 
-                if data != last_payload:
-                    last_payload = data
-                    await websocket.send_json({
-                        "type": "task_update",
-                        "task_id": task_id,
-                        "data": data,
-                    })
+        <p style="margin-top: 20px;">
+            {'The configuration is now active.' if is_success else
+            'Please fix the issue and retry. If the problem persists, contact support with the Deployment ID.'}
+        </p>
 
-                await asyncio.sleep(self.POLL_INTERVAL)
-
-        except asyncio.CancelledError:
-            logging.info(f"🛑 POLLER CANCELLED | ws={id(websocket)} | task={task_id}")
-        except Exception as e:
-            logging.error(f"[POLL-ERROR] task={task_id}: {e}", exc_info=True)
-
-        finally:
-            self.subscription_pollers.pop(key, None)
-            logging.info(f"🧹 POLLER CLEANED | ws={id(websocket)} | task={task_id}")
-
-    self.subscription_pollers[key] = asyncio.create_task(poll_task_status())
-
-    logging.info(
-        f"✅ Subscribed WS {id(websocket)} to task {task_id} | "
-        f"Active pollers={len(self.subscription_pollers)}"
-    )
-    return True
-
-
-
-
-
-async def unsubscribe_from_task(self, websocket: WebSocket, task_id: str):
-    key = (websocket, task_id)
-
-    # stop poller
-    poller = self.subscription_pollers.pop(key, None)
-    if poller:
-        poller.cancel()
-
-    # remove from task_subscriptions
-    subs = self.task_subscriptions.get(task_id)
-    if subs:
-        subs.discard(websocket)
-        if not subs:
-            self.task_subscriptions.pop(task_id, None)
-
-    # remove from connection metadata
-    if websocket in self.active_connections:
-        self.active_connections[websocket]["subscriptions"].discard(task_id)
-
-    logging.info(f"🛑 Unsubscribed WS {id(websocket)} from task {task_id}")
-
-
-
-
-
-
-async def disconnect(self, websocket: WebSocket):
-    # cancel all pollers for this websocket
-    for (ws, task_id), task in list(self.subscription_pollers.items()):
-        if ws is websocket:
-            task.cancel()
-            del self.subscription_pollers[(ws, task_id)]
-
-    # remove from all task subscriptions
-    for task_id, subs in list(self.task_subscriptions.items()):
-        if websocket in subs:
-            subs.discard(websocket)
-            if not subs:
-                self.task_subscriptions.pop(task_id, None)
-
-    self.active_connections.pop(websocket, None)
-    logging.info(f"❌ WS {id(websocket)} disconnected (all pollers cleaned)")
-
-
-
-
-
-
-tmp_path = f"{task_id}.json.tmp"
-with open(tmp_path, "w") as f:
-    json.dump(data, f)
-os.replace(tmp_path, f"{task_id}.json")  # atomic swap
-
-
+        <p style="margin-top: 30px;">
+            Regards,<br>
+            <strong>Auto Deployment System</strong>
+        </p>
+    </body>
+    </html>
+    """
+    return html
