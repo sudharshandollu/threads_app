@@ -58,3 +58,57 @@ def build_html_email(params, status):
     </html>
     """
     return html
+
+
+
+
+def notify_deployment(status, user_email, support_email, params):
+    subject = f"Auto Configuration Deployment {status.capitalize()} – {params['config_name']}"
+    html_body = build_html_email(params, status)
+
+    if status.lower() == "success":
+        send_email(
+            subject=subject,
+            html_body=html_body,
+            to_emails=[user_email],
+            cc_emails=[support_email]
+        )
+    else:
+        send_email(
+            subject=subject,
+            html_body=html_body,
+            to_emails=[user_email]
+        )
+
+
+
+
+
+
+params = {
+    "user_name": "John Doe",
+    "config_name": "AutoConfig-DB",
+    "environment": "Production",
+    "deployment_id": "DEP-55678",
+    "start_time": "2026-01-07 10:00:00",
+    "end_time": "2026-01-07 10:04:20",
+    "failure_time": "2026-01-07 10:02:11",
+    "error_summary": "Database timeout",
+    "error_details": "Unable to connect after 3 retries"
+}
+
+# SUCCESS
+notify_deployment(
+    status="success",
+    user_email="john.doe@company.com",
+    support_email="support@company.com",
+    params=params
+)
+
+# FAILURE
+notify_deployment(
+    status="failure",
+    user_email="john.doe@company.com",
+    support_email="support@company.com",
+    params=params
+)
