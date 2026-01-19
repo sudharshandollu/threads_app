@@ -1,34 +1,79 @@
-def dot_key_to_dict(dotted_key):
-    """
-    Examples:
-      "Name.stage"               -> {"Name": {"stage": ""}}
-      "steps[].tab"              -> {"steps": [{"tab": ""}]}
-      "a.b.c[].d"                -> {"a": {"b": {"c": [{"d": ""}]}}}
-      "a.b.c[].d.e"              -> {"a": {"b": {"c": [{"d": {"e": ""}}]}}}
-    """
+import pandas as pd
+import json
 
-    parts = dotted_key.split(".")
-    root = {}
-    cur = root
+# ---------------- TYPE 1 ----------------
+def process_type_1(xlsx, sheet):
+    df = pd.read_excel(xlsx, sheet_name=sheet, header=None)
+    return df.iat[0, 0] if not df.empty else ""
 
-    for i, part in enumerate(parts):
-        is_list = part.endswith("[]")
-        key = part[:-2] if is_list else part
-        is_last = i == len(parts) - 1
 
-        if is_list:
-            cur[key] = []
-            if is_last:
-                cur[key].append("")
-            else:
-                new_obj = {}
-                cur[key].append(new_obj)
-                cur = new_obj
-        else:
-            if is_last:
-                cur[key] = ""
-            else:
-                cur[key] = {}
-                cur = cur[key]
+# ---------------- TYPE 2 ----------------
+def process_type_2(xlsx, sheet):
+    df = pd.read_excel(xlsx, sheet_name=sheet)
+    key_col = df.columns[0]
+    value_cols = list(df.columns[1:])
 
-    return root
+    result = {}
+    for _, row in df.iterrows():
+        key = row[key_col]
+        if pd.isna(key):
+            continue
+        result[str(key)] = value_cols
+    return result
+
+
+# ---------------- TYPE 3 (INTENTIONALLY SEMANTIC) ----------------
+def process_type_3_pipelines(xlsx, sheet):
+    df = pd.read_excel(xlsx, sheet_name=sheet).fillna("")
+
+    pipelines = {}
+
+    for _, row in df.iterrows():
+        pipeline = row["Pipeline"].strip()
+        stage = row["Stage"].strip()
+
+        step = {
+            "tab": row["StepTab"].strip(),
+            "description": row["StepDescription"].strip(),
+            "Permitted Action List": (
+                [v.strip() for v in row["PermittedActionList"].split(",")]
+                if row["PermittedActionList"] else []
+            )
+        }
+
+        pipelines \
+            .setdefault(pipeline, {}) \
+            .setdefault("stages", {}) \
+            .setdefault(stage, {}) \
+            .setdefault("steps", []) \
+            .append(step)
+
+    return pipelines
+
+
+# ---------------- MASTER DISPATCHER ----------------
+def build_final_json(xlsx):
+    master = pd.read_excel(xlsx, sheet_name="Master").fillna("")
+    final = {}
+
+    for _, row in master.iterrows():
+        sheet = row["sheet_name"]
+        stype = row["sheet_type"]
+        root = row["root_key"]
+
+        if stype == "TYPE_1":
+            final[root] = process_type_1(xlsx, sheet)
+
+        elif stype == "TYPE_2":
+            final[root] = process_type_2(xlsx, sheet)
+
+        elif stype == "TYPE_3":
+            final[root] = process_type_3_pipelines(xlsx, sheet)
+
+    return final
+
+
+# ---------------- RUN ----------------
+if __name__ == "__main__":
+    result = build_final_json("input.xlsx")
+    print(json.dumps(result, separators=(",", ":")))
