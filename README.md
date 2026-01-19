@@ -1,77 +1,90 @@
-#!/usr/bin/env python3
-
-import sys
+import pandas as pd
 import json
-import uuid
-import logging
 
-from control_platform.generic_comp.execution_context import ExecutionContext
-from control_platform.generic_comp.completeness_control import CompletenessControl
+# -----------------------------
+# Utilities
+# -----------------------------
+def read_master_config(xlsx_path):
+    df = pd.read_excel(xlsx_path, sheet_name="Master_Config", dtype=str)
+    return df.fillna("")
 
+def non_empty(val):
+    return val is not None and str(val).strip() != ""
 
-def setup_logging(run_id: str):
-    logging.basicConfig(
-        level=logging.INFO,
-        format=(
-            "%(asctime)s | %(levelname)s | "
-            "run_id=%(run_id)s | step=%(step)s | %(message)s"
-        ),
-    )
+# -----------------------------
+# TYPE_1: Description sheet
+# -----------------------------
+def process_type_1(xlsx_path, cfg):
+    sheet = cfg["sheet_name"]
+    root_key = cfg["root_key"]
+    cell = cfg["key_column"]  # e.g., A1
 
-    old_factory = logging.getLogRecordFactory()
+    df = pd.read_excel(xlsx_path, sheet_name=sheet, header=None)
+    row = int(cell[1:]) - 1
+    col = ord(cell[0].upper()) - ord("A")
 
-    def record_factory(*args, **kwargs):
-        record = old_factory(*args, **kwargs)
-        record.run_id = run_id
-        record.step = "-"
-        return record
+    value = str(df.iat[row, col]).strip()
+    return {root_key: value}
 
-    logging.setLogRecordFactory(record_factory)
+# -----------------------------
+# TYPE_5: Key → headers_except_key
+# -----------------------------
+def process_type_5(xlsx_path, cfg):
+    sheet = cfg["sheet_name"]
+    root_key = cfg["root_key"]
+    key_col = cfg["key_column"]
+    include_rule = cfg["include_rule"]
 
+    df = pd.read_excel(xlsx_path, sheet_name=sheet, dtype=str).fillna("")
 
-def main():
-    if len(sys.argv) != 2:
-        print("Usage: run_control.py <params.json>")
-        sys.exit(1)
+    headers = list(df.columns)
+    value_headers = [h for h in headers if h != key_col]
 
-    params_path = sys.argv[1]
+    result = {}
 
-    with open(params_path) as f:
-        params = json.load(f)
+    for _, row in df.iterrows():
+        key = row[key_col]
+        if include_rule == "not_empty" and not non_empty(key):
+            continue
+        result[str(key)] = value_headers
 
-    run_id = params.get("run_id", str(uuid.uuid4()))
-    setup_logging(run_id)
+    return {root_key: result}
 
-    logger = logging.getLogger("control_platform")
-    logger.info("CONTROL RUN STARTED")
+# -----------------------------
+# Dispatcher
+# -----------------------------
+def build_json_from_master(xlsx_path):
+    master = read_master_config(xlsx_path)
+    final_json = {}
 
-    try:
-        # -------------------------
-        # Create ExecutionContext
-        # -------------------------
-        context = ExecutionContext(
-            config_path=params["config_path"],
-            config_pattern=params["config_pattern"],
-            root_directory=params["root_directory"],
-            run_env=params["run_env"],
-            expected_run_date=params.get("expected_run_date"),
-            temp_path=params.get("temp_path"),
-            directory=params.get("directory"),
-        )
+    for _, cfg in master.iterrows():
+        if cfg.get("enabled", "true").lower() == "false":
+            continue
 
-        # -------------------------
-        # Run control
-        # -------------------------
-        control = CompletenessControl(context)
-        control.execute()
+        sheet_type = cfg["sheet_type"]
 
-        logger.info("CONTROL RUN COMPLETED")
-        sys.exit(0)
+        if sheet_type == "TYPE_1":
+            out = process_type_1(xlsx_path, cfg)
 
-    except Exception:
-        logger.exception("CONTROL RUN FAILED")
-        sys.exit(2)
+        elif sheet_type == "TYPE_5":
+            out = process_type_5(xlsx_path, cfg)
 
+        else:
+            raise ValueError(f"Unsupported sheet_type: {sheet_type}")
 
+        final_json.update(out)
+
+    return final_json
+
+# -----------------------------
+# Run
+# -----------------------------
 if __name__ == "__main__":
-    main()
+    excel_file = "input.xlsx"
+
+    output = build_json_from_master(excel_file)
+
+    with open("output.json", "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, separators=(",", ":"))
+
+    print(json.dumps(output, indent=2))
