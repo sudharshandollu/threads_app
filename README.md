@@ -7,33 +7,35 @@ def process_type_3(xlsx_path, sheet_name, root_key):
 
     for _, row in df.iterrows():
 
-        # ---- 1. Identify the ROOT KEY (first path segment)
-        key_value = None
-        key_name = None
+        # -------- 1. Identify KEY column (single-part header)
+        key_col = None
+        key_val = None
 
         for col in df.columns:
-            parts = col.split(".")
-            if len(parts) == 1 and row[col].strip():
-                key_name = parts[0]
-                key_value = row[col].strip()
-                break
+            if "." not in col and "[]" not in col:
+                val = row[col].strip()
+                if val:
+                    key_col = col
+                    key_val = val
+                    break
 
-        if not key_value:
+        if not key_val:
             continue
 
-        root = result.setdefault(key_value, {})
+        # Always start from a dict container
+        root_container = result.setdefault(key_val, {})
 
-        # ---- 2. Process remaining columns (skip the key column)
+        # -------- 2. Process remaining columns
         for col in df.columns:
-            if col == key_name:
+            if col == key_col:
                 continue
 
             val = row[col].strip()
             if not val:
                 continue
 
-            parts = col.split(".")[1:]  # drop key name
-            cur = root
+            parts = col.split(".")[1:] if col.startswith(key_col + ".") else col.split(".")
+            cur = root_container  # GUARANTEED dict
 
             for i, part in enumerate(parts):
                 is_list = part.endswith("[]")
@@ -41,9 +43,11 @@ def process_type_3(xlsx_path, sheet_name, root_key):
                 is_last = i == len(parts) - 1
 
                 if is_list:
-                    cur.setdefault(key, [])
+                    if key not in cur or not isinstance(cur[key], list):
+                        cur[key] = []
+
                     if is_last:
-                        # split comma values if needed
+                        # value may be scalar or comma-list
                         if "," in val:
                             cur[key].append([v.strip() for v in val.split(",")])
                         else:
@@ -52,11 +56,13 @@ def process_type_3(xlsx_path, sheet_name, root_key):
                         if not cur[key] or not isinstance(cur[key][-1], dict):
                             cur[key].append({})
                         cur = cur[key][-1]
+
                 else:
                     if is_last:
                         cur[key] = val
                     else:
-                        cur.setdefault(key, {})
+                        if key not in cur or not isinstance(cur[key], dict):
+                            cur[key] = {}
                         cur = cur[key]
 
     return {root_key: result}
