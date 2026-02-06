@@ -1,55 +1,56 @@
-import os
-import pickle
-from cryptography.fernet import Fernet
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Alert: Files Not Yet Arrived</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f3f4f6; font-family:Arial, Helvetica, sans-serif;">
 
-def decrypt_pickle_file(file_path: str):
-    password = get_password()
+  <table width="100%" cellpadding="0" cellspacing="0">
+    <tr>
+      <td align="center" style="padding:30px 10px;">
 
-    # read encrypted pickle
-    with open(file_path, "rb") as f:
-        raw = f.read()
+        <!-- Container -->
+        <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff; border-radius:8px; padding:24px;">
 
-    salt = raw[:16]
-    encrypted_data = raw[16:]
+          <!-- Header -->
+          <tr>
+            <td style="font-size:20px; font-weight:bold; color:#111827; padding-bottom:12px;">
+              ⚠️ Alert Notification
+            </td>
+          </tr>
 
-    key = derive_key(password, salt)
-    decrypted_bytes = Fernet(key).decrypt(encrypted_data)
+          <!-- Alert Box -->
+          <tr>
+            <td style="background:#fef3c7; border-left:5px solid #f59e0b; padding:14px; border-radius:6px; font-size:14px; color:#92400e;">
+              <strong>Attention:</strong> The required files have not yet arrived.
+            </td>
+          </tr>
 
-    obj = pickle.loads(decrypted_bytes)
+          <!-- Message -->
+          <tr>
+            <td style="padding-top:16px; font-size:14px; color:#374151; line-height:1.6;">
+              This is to inform you that the expected files are still pending and have not been received as of now.
+              <br><br>
+              Please ensure the files are shared at the earliest to avoid any delays in processing.
+            </td>
+          </tr>
 
-    # atomic replace with decrypted pickle
-    tmp_path = file_path + ".tmp"
-    with open(tmp_path, "wb") as f:
-        pickle.dump(obj, f)
-        f.flush()
-        os.fsync(f.fileno())
+          <!-- Footer -->
+          <tr>
+            <td style="padding-top:24px; font-size:12px; color:#6b7280;">
+              If you have already shared the files, please ignore this message.
+              <br><br>
+              Regards,<br>
+              <strong>Support Team</strong>
+            </td>
+          </tr>
 
-    os.replace(tmp_path, file_path)
+        </table>
 
+      </td>
+    </tr>
+  </table>
 
-
-
-
-import os
-import pickle
-from cryptography.fernet import Fernet
-
-def encrypt_pickle_file(file_path: str):
-    password = get_password()
-    salt = os.urandom(16)
-
-    # load pickle safely
-    with open(file_path, "rb") as f:
-        obj = pickle.load(f)
-
-    key = derive_key(password, salt)
-    encrypted = Fernet(key).encrypt(pickle.dumps(obj))
-
-    # atomic replace
-    tmp_path = file_path + ".tmp"
-    with open(tmp_path, "wb") as f:
-        f.write(salt + encrypted)
-        f.flush()
-        os.fsync(f.fileno())
-
-    os.replace(tmp_path, file_path)
+</body>
+</html>
