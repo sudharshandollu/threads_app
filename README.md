@@ -1,56 +1,20 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Alert: Files Not Yet Arrived</title>
-</head>
-<body style="margin:0; padding:0; background-color:#f3f4f6; font-family:Arial, Helvetica, sans-serif;">
+from datetime import date, timedelta
 
-  <table width="100%" cellpadding="0" cellspacing="0">
-    <tr>
-      <td align="center" style="padding:30px 10px;">
+def weekday_index_in_month(input_date: date) -> int:
+    """
+    Returns which occurrence of the weekday this date is in its month.
+    Example:
+        2024-02-17 (Saturday) -> 3  (3rd Saturday of Feb 2024)
+    """
+    weekday = input_date.weekday()  # Monday=0, Sunday=6
+    first_day = input_date.replace(day=1)
 
-        <!-- Container -->
-        <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff; border-radius:8px; padding:24px;">
+    count = 0
+    current = first_day
 
-          <!-- Header -->
-          <tr>
-            <td style="font-size:20px; font-weight:bold; color:#111827; padding-bottom:12px;">
-              ⚠️ Alert Notification
-            </td>
-          </tr>
+    while current <= input_date:
+        if current.weekday() == weekday:
+            count += 1
+        current += timedelta(days=1)
 
-          <!-- Alert Box -->
-          <tr>
-            <td style="background:#fef3c7; border-left:5px solid #f59e0b; padding:14px; border-radius:6px; font-size:14px; color:#92400e;">
-              <strong>Attention:</strong> The required files have not yet arrived.
-            </td>
-          </tr>
-
-          <!-- Message -->
-          <tr>
-            <td style="padding-top:16px; font-size:14px; color:#374151; line-height:1.6;">
-              This is to inform you that the expected files are still pending and have not been received as of now.
-              <br><br>
-              Please ensure the files are shared at the earliest to avoid any delays in processing.
-            </td>
-          </tr>
-
-          <!-- Footer -->
-          <tr>
-            <td style="padding-top:24px; font-size:12px; color:#6b7280;">
-              If you have already shared the files, please ignore this message.
-              <br><br>
-              Regards,<br>
-              <strong>Support Team</strong>
-            </td>
-          </tr>
-
-        </table>
-
-      </td>
-    </tr>
-  </table>
-
-</body>
-</html>
+    return count
