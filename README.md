@@ -1,274 +1,475 @@
-# ================================
-# file: control_framework/models/execution_context.py
-# ================================
+"""
+========================================================
+PROJECT STRUCTURE (src layout)
+========================================================
 
-from dataclasses import dataclass
+etl-core/
+│
+├── pyproject.toml
+│
+├── src/
+│   └── etl_core/
+│
+│       ├── __init__.py
+│
+│       ├── logging/
+│       │       logger.py
+│
+│       ├── schemas/
+│       │       run_parameters.py
+│
+│       ├── utils/
+│       │       path_utils.py
+│
+│       ├── services/
+│       │       file_service.py
+│
+│       ├── nodes/
+│       │       base.py
+│       │       reading.py
+│       │       filter.py
+│       │       transform.py
+│       │       harmonis.py
+│
+│       ├── pipelines/
+│       │       base.py
+│       │       qa_pipeline.py
+│       │       com_pipeline.py
+│
+└── tests/
+"""
 
-@dataclass
-class ExecutionContext:
-    request: dict
-    data: dict | None = None
-    result: dict | None = None
+# =====================================================
+# pyproject.toml
+# =====================================================
+
+"""
+[project]
+name = "etl-core"
+version = "0.1.0"
+dependencies = [
+    "pydantic"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+"""
+
+# =====================================================
+# src/etl_core/logging/logger.py
+# =====================================================
+
+import logging
+import sys
 
 
-# ================================
-# file: control_framework/core/step.py
-# ================================
+def setup_logging(level: str = "INFO"):
+
+    logging.basicConfig(
+        level=level,
+        format=(
+            "%(asctime)s | %(levelname)s | %(name)s | "
+            "%(funcName)s | %(message)s"
+        ),
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+
+def get_logger(name: str):
+    return logging.getLogger(name)
+
+
+# =====================================================
+# src/etl_core/schemas/run_parameters.py
+# =====================================================
+
+from pydantic import BaseModel
+from pathlib import Path
+
+
+class RunParameters(BaseModel):
+    path: Path
+    pattern: str
+    run_env: str
+
+
+# =====================================================
+# src/etl_core/utils/path_utils.py
+# =====================================================
+
+from pathlib import Path
+from typing import List
+from etl_core.logging.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def get_files(path: Path, pattern: str) -> List[Path]:
+
+    logger.info("Searching files", extra={"path": str(path), "pattern": pattern})
+
+    files = list(path.glob(pattern))
+
+    logger.info(f"Found {len(files)} files")
+
+    return files
+
+
+# =====================================================
+# src/etl_core/services/file_service.py
+# =====================================================
+
+from pathlib import Path
+from typing import List
+from etl_core.logging.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class FileService:
+
+    def read_files(self, files: List[Path]) -> List[str]:
+
+        logger.info("Starting file read")
+
+        data = []
+
+        for file in files:
+
+            try:
+                logger.debug(f"Reading file {file}")
+
+                data.append(file.read_text())
+
+            except Exception as e:
+
+                logger.error(f"Failed reading file {file}: {e}")
+                raise
+
+        logger.info("Completed file reading")
+
+        return data
+
+
+# =====================================================
+# src/etl_core/nodes/base.py
+# =====================================================
 
 from abc import ABC, abstractmethod
+from typing import Any
+from etl_core.logging.logger import get_logger
 
-class Step(ABC):
+logger = get_logger(__name__)
+
+
+class BaseNode(ABC):
 
     @abstractmethod
-    def run(self, context):
+    def run(self, data: Any, **kwargs) -> Any:
         pass
 
 
-# ================================
-# file: control_framework/core/base_executor.py
-# ================================
+# =====================================================
+# src/etl_core/nodes/reading.py
+# =====================================================
 
-class BaseExecutor:
+from typing import Any
+from etl_core.nodes.base import BaseNode
+from etl_core.schemas.run_parameters import RunParameters
+from etl_core.utils.path_utils import get_files
+from etl_core.services.file_service import FileService
+from etl_core.logging.logger import get_logger
 
-    def __init__(self, steps):
-        self.steps = steps
-
-    def execute(self, context):
-
-        for step in self.steps:
-            step.run(context)
-
-        return context.result
+logger = get_logger(__name__)
 
 
-# ================================
-# file: control_framework/steps/validate_step.py
-# ================================
-
-from control_framework.core.step import Step
-
-class ValidateStep(Step):
-
-    def run(self, context):
-        print("Validating request")
-
-        if "control_id" not in context.request:
-            raise ValueError("control_id missing in request")
-
-
-# ================================
-# file: control_framework/steps/fetch_data_step.py
-# ================================
-
-from control_framework.core.step import Step
-
-class FetchDataStep(Step):
-
-    def run(self, context):
-        print("Fetching data")
-
-        # Simulated data fetch
-        context.data = {"records": [10, 20, 30]}
-
-
-# ================================
-# file: control_framework/steps/compute_metrics_step.py
-# ================================
-
-from control_framework.core.step import Step
-
-class ComputeMetricsStep(Step):
-
-    def run(self, context):
-
-        print("Computing metrics")
-
-        records = context.data["records"]
-
-        context.result = {
-            "total": sum(records),
-            "count": len(records)
-        }
-
-
-# ================================
-# file: control_framework/steps/enrich_step.py
-# ================================
-
-from control_framework.core.step import Step
-
-class EnrichStep(Step):
-
-    def run(self, context):
-
-        print("Enriching data")
-
-        context.data["enriched"] = True
-
-
-# ================================
-# file: control_framework/steps/save_result_step.py
-# ================================
-
-from control_framework.core.step import Step
-
-class SaveResultStep(Step):
-
-    def run(self, context):
-
-        print("Saving result")
-
-        context.result = {
-            "status": "saved",
-            "data": context.data
-        }
-
-
-# ================================
-# file: control_framework/executors/type1_executor.py
-# ================================
-
-from control_framework.core.base_executor import BaseExecutor
-from control_framework.steps.validate_step import ValidateStep
-from control_framework.steps.fetch_data_step import FetchDataStep
-from control_framework.steps.compute_metrics_step import ComputeMetricsStep
-
-
-class Type1Executor(BaseExecutor):
+class ReadingNode(BaseNode):
 
     def __init__(self):
+        self.file_service = FileService()
 
-        steps = [
-            ValidateStep(),
-            FetchDataStep(),
-            ComputeMetricsStep()
-        ]
+    def run(self, data: Any, run_parameters: RunParameters):
 
-        super().__init__(steps)
+        logger.info("Starting ReadingNode execution")
 
+        try:
 
-# ================================
-# file: control_framework/executors/type2_executor.py
-# ================================
+            files = get_files(run_parameters.path, run_parameters.pattern)
 
-from control_framework.core.base_executor import BaseExecutor
-from control_framework.steps.validate_step import ValidateStep
-from control_framework.steps.fetch_data_step import FetchDataStep
-from control_framework.steps.enrich_step import EnrichStep
-from control_framework.steps.save_result_step import SaveResultStep
+            contents = self.file_service.read_files(files)
 
+            logger.info(
+                f"ReadingNode completed successfully. Records: {len(contents)}"
+            )
 
-class Type2Executor(BaseExecutor):
+            return contents
 
-    def __init__(self):
+        except Exception as e:
 
-        steps = [
-            ValidateStep(),
-            FetchDataStep(),
-            EnrichStep(),
-            SaveResultStep()
-        ]
+            logger.exception("ReadingNode failed")
 
-        super().__init__(steps)
+            raise
 
 
-# ================================
-# file: control_framework/factory/executor_factory.py
-# ================================
+# =====================================================
+# src/etl_core/nodes/filter.py
+# =====================================================
 
-from control_framework.executors.type1_executor import Type1Executor
-from control_framework.executors.type2_executor import Type2Executor
+from typing import List
+from etl_core.nodes.base import BaseNode
+from etl_core.logging.logger import get_logger
 
-
-def get_executor(control_type: str):
-
-    executors = {
-        "type1": Type1Executor,
-        "type2": Type2Executor
-    }
-
-    executor_class = executors.get(control_type)
-
-    if not executor_class:
-        raise ValueError(f"Unsupported control type: {control_type}")
-
-    return executor_class()
+logger = get_logger(__name__)
 
 
-# ================================
-# file: run_control.py
-# ================================
+class FilterNode(BaseNode):
 
-from control_framework.factory.executor_factory import get_executor
-from control_framework.models.execution_context import ExecutionContext
+    def run(self, data: List[str], **kwargs) -> List[str]:
 
+        logger.info("Starting FilterNode")
+
+        try:
+
+            filtered = [d for d in data if d.strip()]
+
+            logger.info(f"FilterNode completed. Records: {len(filtered)}")
+
+            return filtered
+
+        except Exception:
+
+            logger.exception("FilterNode failed")
+
+            raise
+
+
+# =====================================================
+# src/etl_core/nodes/transform.py
+# =====================================================
+
+from typing import List
+from etl_core.nodes.base import BaseNode
+from etl_core.logging.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class TransformNode(BaseNode):
+
+    def run(self, data: List[str], **kwargs) -> List[str]:
+
+        logger.info("Starting TransformNode")
+
+        try:
+
+            transformed = [d.upper() for d in data]
+
+            logger.info("TransformNode completed")
+
+            return transformed
+
+        except Exception:
+
+            logger.exception("TransformNode failed")
+
+            raise
+
+
+# =====================================================
+# src/etl_core/nodes/harmonis.py
+# =====================================================
+
+from typing import List
+from etl_core.nodes.base import BaseNode
+from etl_core.logging.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class HarmoniseNode(BaseNode):
+
+    def run(self, data: List[str], **kwargs) -> List[str]:
+
+        logger.info("Starting HarmoniseNode")
+
+        try:
+
+            harmonised = [f"HARMONISED::{d}" for d in data]
+
+            logger.info("HarmoniseNode completed")
+
+            return harmonised
+
+        except Exception:
+
+            logger.exception("HarmoniseNode failed")
+
+            raise
+
+
+# =====================================================
+# src/etl_core/pipelines/base.py
+# =====================================================
+
+from abc import ABC, abstractmethod
+from etl_core.schemas.run_parameters import RunParameters
+from etl_core.logging.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class BasePipeline(ABC):
+
+    def __init__(self, run_parameters: RunParameters):
+        self.run_parameters = run_parameters
+
+    @abstractmethod
+    def run(self):
+        pass
+
+    @classmethod
+    def run_with(cls, path, pattern, run_env):
+
+        params = RunParameters(
+            path=path,
+            pattern=pattern,
+            run_env=run_env,
+        )
+
+        pipeline = cls(params)
+
+        return pipeline.run()
+
+
+# =====================================================
+# src/etl_core/pipelines/qa_pipeline.py
+# =====================================================
+
+from etl_core.pipelines.base import BasePipeline
+from etl_core.nodes.reading import ReadingNode
+from etl_core.nodes.filter import FilterNode
+from etl_core.nodes.transform import TransformNode
+from etl_core.logging.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class QAPipeline(BasePipeline):
+
+    def run(self):
+
+        logger.info("QA Pipeline started")
+
+        try:
+
+            reader = ReadingNode()
+            filter_node = FilterNode()
+            transformer = TransformNode()
+
+            data = reader.run(None, self.run_parameters)
+
+            data = filter_node.run(data)
+
+            data = transformer.run(data)
+
+            logger.info("QA Pipeline completed successfully")
+
+            return data
+
+        except Exception:
+
+            logger.exception("QA Pipeline failed")
+
+            raise
+
+
+# =====================================================
+# src/etl_core/pipelines/com_pipeline.py
+# =====================================================
+
+from etl_core.pipelines.base import BasePipeline
+from etl_core.nodes.reading import ReadingNode
+from etl_core.nodes.filter import FilterNode
+from etl_core.nodes.transform import TransformNode
+from etl_core.nodes.harmonis import HarmoniseNode
+from etl_core.logging.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class COMPipeline(BasePipeline):
+
+    def run(self):
+
+        logger.info("COM Pipeline started")
+
+        try:
+
+            reader = ReadingNode()
+            filter_node = FilterNode()
+            transformer = TransformNode()
+            harmoniser = HarmoniseNode()
+
+            data = reader.run(None, self.run_parameters)
+
+            data = filter_node.run(data)
+
+            data = transformer.run(data)
+
+            data = harmoniser.run(data)
+
+            logger.info("COM Pipeline completed successfully")
+
+            return data
+
+        except Exception:
+
+            logger.exception("COM Pipeline failed")
+
+            raise
+
+
+# =====================================================
+# src/etl_core/__init__.py
+# =====================================================
+
+from etl_core.logging.logger import setup_logging
+from etl_core.pipelines.qa_pipeline import QAPipeline
+from etl_core.pipelines.com_pipeline import COMPipeline
+
+setup_logging()
+
+__all__ = [
+    "QAPipeline",
+    "COMPipeline",
+]
+
+
+# =====================================================
+# Example Usage
+# =====================================================
 
 if __name__ == "__main__":
 
-    request = {
-        "control_id": "CTR001",
-        "start_date": "2024-01-01",
-        "end_date": "2024-01-10"
-    }
+    from pathlib import Path
+    from etl_core import QAPipeline, COMPipeline
 
-    context = ExecutionContext(request=request)
+    path = Path("./data")
 
-    executor = get_executor("type1")
+    print("\n---- QA PIPELINE ----")
 
-    result = executor.execute(context)
+    qa_result = QAPipeline.run_with(
+        path=path,
+        pattern="*.txt",
+        run_env="dev",
+    )
 
-    print("\nFinal Result:")
-    print(result)
+    print(qa_result)
 
+    print("\n---- COM PIPELINE ----")
 
-
-
-
-project-root/
-│
-├── pyproject.toml
-├── README.md
-├── .gitignore
-│
-├── src/
-│   └── control_framework/
-│       │
-│       ├── __init__.py
-│       │
-│       ├── core/
-│       │   ├── __init__.py
-│       │   ├── base_executor.py
-│       │   └── step.py
-│       │
-│       ├── models/
-│       │   ├── __init__.py
-│       │   └── execution_context.py
-│       │
-│       ├── steps/
-│       │   ├── __init__.py
-│       │   ├── validate_step.py
-│       │   ├── fetch_data_step.py
-│       │   ├── compute_metrics_step.py
-│       │   ├── enrich_step.py
-│       │   └── save_result_step.py
-│       │
-│       ├── executors/
-│       │   ├── __init__.py
-│       │   ├── type1_executor.py
-│       │   └── type2_executor.py
-│       │
-│       └── factory/
-│           ├── __init__.py
-│           └── executor_factory.py
-│
-├── scripts/
-│   └── run_control.py
-│
-└── tests/
-    └── test_executor.py
-
-
-
-
-
-
+    com_result = COMPipeline.run_with(
+        path=path,
+        pattern="*.txt",
+        run_env="dev",
+    )
