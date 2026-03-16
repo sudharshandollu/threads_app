@@ -1,7 +1,7 @@
 import psutil
 import smtplib
+import socket
 import time
-import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from collections import deque
@@ -55,22 +55,145 @@ def send_alert_email(avg_memory_gb: float) -> bool:
 global last_email_sent
 
 ```
-subject = f"⚠️ Memory Alert: Avg usage {avg_memory_gb} GB (last {AVERAGING_WINDOW_MIN} min)"
-body = (
-    f"Memory usage alert on {os.uname().nodename}\n"
-    f"-------------------------------------------\n"
-    f"Average memory used (last {AVERAGING_WINDOW_MIN} min): {avg_memory_gb} GB\n"
-    f"Threshold: {MEMORY_THRESHOLD_GB} GB\n"
-    f"Current memory used: {get_memory_used_gb()} GB\n"
-    f"Total system memory: {round(psutil.virtual_memory().total / (1024**3), 2)} GB\n"
-    f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-)
+hostname = socket.gethostname()
+current_gb = get_memory_used_gb()
+total_gb = round(psutil.virtual_memory().total / (1024 ** 3), 2)
+usage_pct = round((avg_memory_gb / total_gb) * 100, 1)
+timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-msg = MIMEMultipart()
+subject = f"⚠️ Memory Alert: Avg usage {avg_memory_gb} GB (last {AVERAGING_WINDOW_MIN} min)"
+html_body = f"""
+<html>
+<body style="margin:0; padding:0; font-family:Arial, sans-serif; background-color:#f4f4f7;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="padding:20px;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0"
+               style="background:#ffffff; border-radius:8px; overflow:hidden;
+                      box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+          <!-- Header -->
+          <tr>
+            <td style="background:linear-gradient(135deg,#d32f2f,#b71c1c); padding:24px 30px;">
+              <h2 style="margin:0; color:#ffffff; font-size:20px;">
+                ⚠️ High Memory Usage Alert
+              </h2>
+              <p style="margin:6px 0 0; color:#ffcdd2; font-size:13px;">
+                Server: <strong>{hostname}</strong> &nbsp;|&nbsp; {timestamp}
+              </p>
+            </td>
+          </tr>
+          <!-- Summary Bar -->
+          <tr>
+            <td style="padding:20px 30px 10px;">
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="text-align:center; padding:10px;">
+                    <p style="margin:0; font-size:12px; color:#888;">AVG MEMORY USED</p>
+                    <p style="margin:4px 0 0; font-size:28px; font-weight:bold; color:#d32f2f;">
+                      {avg_memory_gb} GB
+                    </p>
+                  </td>
+                  <td style="text-align:center; padding:10px;">
+                    <p style="margin:0; font-size:12px; color:#888;">THRESHOLD</p>
+                    <p style="margin:4px 0 0; font-size:28px; font-weight:bold; color:#333;">
+                      {MEMORY_THRESHOLD_GB} GB
+                    </p>
+                  </td>
+                  <td style="text-align:center; padding:10px;">
+                    <p style="margin:0; font-size:12px; color:#888;">USAGE</p>
+                    <p style="margin:4px 0 0; font-size:28px; font-weight:bold; color:#d32f2f;">
+                      {usage_pct}%
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <!-- Progress Bar -->
+          <tr>
+            <td style="padding:0 30px 20px;">
+              <div style="background:#eee; border-radius:6px; height:12px; overflow:hidden;">
+                <div style="background:{'#d32f2f' if usage_pct > 80 else '#fb8c00'};
+                            width:{min(usage_pct, 100)}%; height:100%; border-radius:6px;">
+                </div>
+              </div>
+            </td>
+          </tr>
+          <!-- Detail Table -->
+          <tr>
+            <td style="padding:0 30px 24px;">
+              <table width="100%" cellpadding="0" cellspacing="0"
+                     style="border:1px solid #e0e0e0; border-radius:6px; overflow:hidden;">
+                <tr style="background:#f9f9f9;">
+                  <td style="padding:10px 16px; font-size:13px; color:#555; border-bottom:1px solid #e0e0e0;">
+                    Metric
+                  </td>
+                  <td style="padding:10px 16px; font-size:13px; color:#555; border-bottom:1px solid #e0e0e0;
+                             text-align:right;">
+                    Value
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 16px; font-size:14px; border-bottom:1px solid #f0f0f0;">
+                    Avg Memory ({AVERAGING_WINDOW_MIN} min)
+                  </td>
+                  <td style="padding:10px 16px; font-size:14px; text-align:right; font-weight:bold;
+                             color:#d32f2f; border-bottom:1px solid #f0f0f0;">
+                    {avg_memory_gb} GB
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 16px; font-size:14px; border-bottom:1px solid #f0f0f0;">
+                    Current Memory Used
+                  </td>
+                  <td style="padding:10px 16px; font-size:14px; text-align:right;
+                             border-bottom:1px solid #f0f0f0;">
+                    {current_gb} GB
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 16px; font-size:14px; border-bottom:1px solid #f0f0f0;">
+                    Total System Memory
+                  </td>
+                  <td style="padding:10px 16px; font-size:14px; text-align:right;
+                             border-bottom:1px solid #f0f0f0;">
+                    {total_gb} GB
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 16px; font-size:14px;">
+                    Threshold
+                  </td>
+                  <td style="padding:10px 16px; font-size:14px; text-align:right;">
+                    {MEMORY_THRESHOLD_GB} GB
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <!-- Footer -->
+          <tr>
+            <td style="background:#fafafa; padding:16px 30px; border-top:1px solid #eee;">
+              <p style="margin:0; font-size:12px; color:#999; text-align:center;">
+                This is an automated alert from the Memory Monitor service on
+                <strong>{hostname}</strong>.<br>
+                Next alert will be suppressed for {EMAIL_COOLDOWN_MIN} minutes.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+"""
+
+msg = MIMEMultipart("alternative")
 msg["From"] = SENDER_EMAIL
 msg["To"] = RECIPIENT_EMAIL
 msg["Subject"] = subject
-msg.attach(MIMEText(body, "plain"))
+msg.attach(MIMEText(html_body, "html"))
 
 try:
     with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
