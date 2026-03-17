@@ -1,250 +1,331 @@
-import psutil
-import smtplib
-import socket
-import time
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from collections import deque
-from datetime import datetime, timedelta
+import subprocess
+from dataclasses import dataclass, field
 
-# — Configuration —
+# =====================================================================
 
-MEMORY_THRESHOLD_GB = 40
-CHECK_INTERVAL_SEC = 60          # How often to sample memory (seconds)
-AVERAGING_WINDOW_MIN = 60        # Window for computing average (minutes)
-EMAIL_COOLDOWN_MIN = 60          # Don’t re-send within this many minutes
+# Server Configuration
 
-SMTP_SERVER = “smtp.gmail.com”
-SMTP_PORT = 587
-SENDER_EMAIL = “your_email@gmail.com”
-SENDER_PASSWORD = “your_app_password”   # Use an App Password, not your real password
-RECIPIENT_EMAIL = “recipient@example.com”
+# =====================================================================
 
-# Each sample: (timestamp, memory_used_gb)
+@dataclass
+class ServerConfig:
+hostname: str
+user: str
+port: int = 22
+ssh_key: str | None = None  # Optional path to SSH private key
 
-memory_samples: deque[tuple[datetime, float]] = deque()
-last_email_sent: datetime | None = None
+# Map friendly server names → connection details (use hostnames, not IPs)
 
-def get_memory_used_gb() -> float:
-“”“Return current used memory in GB.”””
-mem = psutil.virtual_memory()
-used_gb = mem.used / (1024 ** 3)
-return round(used_gb, 2)
+UAT_SERVERS: dict[str, ServerConfig] = {
+“uat-server-1”: ServerConfig(hostname=“uat-app-node01.company.com”, user=“deploy”),
+“uat-server-2”: ServerConfig(hostname=“uat-app-node02.company.com”, user=“deploy”),
+“uat-server-3”: ServerConfig(hostname=“uat-app-node03.company.com”, user=“deploy”, port=2222),
+}
 
-def prune_old_samples(window_minutes: int = AVERAGING_WINDOW_MIN) -> None:
-“”“Remove samples older than the averaging window.”””
-cutoff = datetime.now() - timedelta(minutes=window_minutes)
-while memory_samples and memory_samples[0][0] < cutoff:
-memory_samples.popleft()
+# =====================================================================
 
-def get_average_memory_gb() -> float | None:
-“”“Return average memory usage (GB) over the stored samples.”””
-if not memory_samples:
-return None
-total = sum(sample[1] for sample in memory_samples)
-return round(total / len(memory_samples), 2)
+# Application Configuration
 
-def can_send_email() -> bool:
-“”“Return True if no email was sent in the last EMAIL_COOLDOWN_MIN minutes.”””
-if last_email_sent is None:
-return True
-return datetime.now() - last_email_sent > timedelta(minutes=EMAIL_COOLDOWN_MIN)
+# =====================================================================
 
-def send_alert_email(avg_memory_gb: float) -> bool:
-“”“Send an alert email and return True on success.”””
-global last_email_sent
+@dataclass
+class AppConfig:
+name: str                          # Friendly display name
+process_name: str                  # Process name as seen in `ps` / `pgrep`
+work_dir: str                      # Working directory on the server
+start_cmd: str                     # Command to start the app
+stop_cmd: str = “”                 # Command to stop the app
+health_check_cmd: str = “”         # Command to verify app is running
+allowed_servers: list[str] = field(default_factory=list)  # Restrict to specific servers
+
+# Map custom app names → process and run details
+
+APPLICATIONS: dict[str, AppConfig] = {
+“order-service”: AppConfig(
+name=“Order Service”,
+process_name=“java”,
+work_dir=”/opt/apps/order-service”,
+start_cmd=”./start.sh”,
+stop_cmd=”./stop.sh”,
+health_check_cmd=“curl -sf http://localhost:8080/health”,
+allowed_servers=[“uat-server-1”, “uat-server-2”],
+),
+“payment-gateway”: AppConfig(
+name=“Payment Gateway”,
+process_name=“python3”,
+work_dir=”/opt/apps/payment-gateway”,
+start_cmd=”./run.sh”,
+stop_cmd=”./stop.sh”,
+health_check_cmd=“curl -sf http://localhost:9090/ping”,
+allowed_servers=[“uat-server-1”],
+),
+“notification-worker”: AppConfig(
+name=“Notification Worker”,
+process_name=“node”,
+work_dir=”/opt/apps/notification-worker”,
+start_cmd=“npm run start:prod”,
+stop_cmd=“npm run stop”,
+health_check_cmd=“pgrep -f ‘notification-worker’”,
+allowed_servers=[“uat-server-2”, “uat-server-3”],
+),
+}
+
+# =====================================================================
+
+# Remote Execution via SSH
+
+# =====================================================================
+
+class RemoteExecutionError(Exception):
+“”“Raised when a remote SSH command fails.”””
+pass
+
+def _build_ssh_cmd(server: ServerConfig) -> list[str]:
+“”“Build the base SSH command list for a server.”””
+cmd = [
+“ssh”,
+“-o”, “StrictHostKeyChecking=no”,
+“-o”, “ConnectTimeout=10”,
+“-p”, str(server.port),
+]
+if server.ssh_key:
+cmd += [”-i”, server.ssh_key]
+cmd.append(f”{server.user}@{server.hostname}”)
+return cmd
+
+def run_remote_command(server_name: str, command: str, timeout: int = 60) -> str:
+“””
+Execute a command on a remote server via SSH.
+Returns stdout on success, raises RemoteExecutionError on failure.
+“””
+if server_name not in UAT_SERVERS:
+raise RemoteExecutionError(
+f”Unknown server ‘{server_name}’. “
+f”Available: {’, ’.join(UAT_SERVERS.keys())}”
+)
 
 ```
-hostname = socket.gethostname()
-current_gb = get_memory_used_gb()
-total_gb = round(psutil.virtual_memory().total / (1024 ** 3), 2)
-usage_pct = round((avg_memory_gb / total_gb) * 100, 1)
-timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-subject = f"⚠️ Memory Alert: Avg usage {avg_memory_gb} GB (last {AVERAGING_WINDOW_MIN} min)"
-html_body = f"""
-<html>
-<body style="margin:0; padding:0; font-family:Arial, sans-serif; background-color:#f4f4f7;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="padding:20px;">
-    <tr>
-      <td align="center">
-        <table width="600" cellpadding="0" cellspacing="0"
-               style="background:#ffffff; border-radius:8px; overflow:hidden;
-                      box-shadow:0 2px 8px rgba(0,0,0,0.08);">
-          <!-- Header -->
-          <tr>
-            <td style="background:linear-gradient(135deg,#d32f2f,#b71c1c); padding:24px 30px;">
-              <h2 style="margin:0; color:#ffffff; font-size:20px;">
-                ⚠️ High Memory Usage Alert
-              </h2>
-              <p style="margin:6px 0 0; color:#ffcdd2; font-size:13px;">
-                Server: <strong>{hostname}</strong> &nbsp;|&nbsp; {timestamp}
-              </p>
-            </td>
-          </tr>
-          <!-- Summary Bar -->
-          <tr>
-            <td style="padding:20px 30px 10px;">
-              <table width="100%" cellpadding="0" cellspacing="0">
-                <tr>
-                  <td style="text-align:center; padding:10px;">
-                    <p style="margin:0; font-size:12px; color:#888;">AVG MEMORY USED</p>
-                    <p style="margin:4px 0 0; font-size:28px; font-weight:bold; color:#d32f2f;">
-                      {avg_memory_gb} GB
-                    </p>
-                  </td>
-                  <td style="text-align:center; padding:10px;">
-                    <p style="margin:0; font-size:12px; color:#888;">THRESHOLD</p>
-                    <p style="margin:4px 0 0; font-size:28px; font-weight:bold; color:#333;">
-                      {MEMORY_THRESHOLD_GB} GB
-                    </p>
-                  </td>
-                  <td style="text-align:center; padding:10px;">
-                    <p style="margin:0; font-size:12px; color:#888;">USAGE</p>
-                    <p style="margin:4px 0 0; font-size:28px; font-weight:bold; color:#d32f2f;">
-                      {usage_pct}%
-                    </p>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-          <!-- Progress Bar -->
-          <tr>
-            <td style="padding:0 30px 20px;">
-              <div style="background:#eee; border-radius:6px; height:12px; overflow:hidden;">
-                <div style="background:{'#d32f2f' if usage_pct > 80 else '#fb8c00'};
-                            width:{min(usage_pct, 100)}%; height:100%; border-radius:6px;">
-                </div>
-              </div>
-            </td>
-          </tr>
-          <!-- Detail Table -->
-          <tr>
-            <td style="padding:0 30px 24px;">
-              <table width="100%" cellpadding="0" cellspacing="0"
-                     style="border:1px solid #e0e0e0; border-radius:6px; overflow:hidden;">
-                <tr style="background:#f9f9f9;">
-                  <td style="padding:10px 16px; font-size:13px; color:#555; border-bottom:1px solid #e0e0e0;">
-                    Metric
-                  </td>
-                  <td style="padding:10px 16px; font-size:13px; color:#555; border-bottom:1px solid #e0e0e0;
-                             text-align:right;">
-                    Value
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:10px 16px; font-size:14px; border-bottom:1px solid #f0f0f0;">
-                    Avg Memory ({AVERAGING_WINDOW_MIN} min)
-                  </td>
-                  <td style="padding:10px 16px; font-size:14px; text-align:right; font-weight:bold;
-                             color:#d32f2f; border-bottom:1px solid #f0f0f0;">
-                    {avg_memory_gb} GB
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:10px 16px; font-size:14px; border-bottom:1px solid #f0f0f0;">
-                    Current Memory Used
-                  </td>
-                  <td style="padding:10px 16px; font-size:14px; text-align:right;
-                             border-bottom:1px solid #f0f0f0;">
-                    {current_gb} GB
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:10px 16px; font-size:14px; border-bottom:1px solid #f0f0f0;">
-                    Total System Memory
-                  </td>
-                  <td style="padding:10px 16px; font-size:14px; text-align:right;
-                             border-bottom:1px solid #f0f0f0;">
-                    {total_gb} GB
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:10px 16px; font-size:14px;">
-                    Threshold
-                  </td>
-                  <td style="padding:10px 16px; font-size:14px; text-align:right;">
-                    {MEMORY_THRESHOLD_GB} GB
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-          <!-- Footer -->
-          <tr>
-            <td style="background:#fafafa; padding:16px 30px; border-top:1px solid #eee;">
-              <p style="margin:0; font-size:12px; color:#999; text-align:center;">
-                This is an automated alert from the Memory Monitor service on
-                <strong>{hostname}</strong>.<br>
-                Next alert will be suppressed for {EMAIL_COOLDOWN_MIN} minutes.
-              </p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-"""
-
-msg = MIMEMultipart("alternative")
-msg["From"] = SENDER_EMAIL
-msg["To"] = RECIPIENT_EMAIL
-msg["Subject"] = subject
-msg.attach(MIMEText(html_body, "html"))
+server = UAT_SERVERS[server_name]
+ssh_cmd = _build_ssh_cmd(server) + [command]
 
 try:
-    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-        server.starttls()
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        server.send_message(msg)
-    last_email_sent = datetime.now()
-    print(f"[{last_email_sent}] Alert email sent — avg memory: {avg_memory_gb} GB")
+    result = subprocess.run(
+        ssh_cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RemoteExecutionError(
+            f"Command failed on {server_name} ({server.hostname}) "
+            f"[exit {result.returncode}]: {result.stderr.strip()}"
+        )
+    return result.stdout.strip()
+
+except subprocess.TimeoutExpired:
+    raise RemoteExecutionError(
+        f"Command timed out after {timeout}s on {server_name} ({server.hostname})"
+    )
+except FileNotFoundError:
+    raise RemoteExecutionError("SSH client not found. Ensure 'ssh' is installed and in PATH.")
+```
+
+def validate_server_app(server_name: str, app_name: str) -> tuple[ServerConfig, AppConfig]:
+“””
+Validate that the server and app exist, and that the app is allowed
+to run on the given server. Returns (ServerConfig, AppConfig).
+“””
+if server_name not in UAT_SERVERS:
+raise RemoteExecutionError(
+f”Unknown server ‘{server_name}’. “
+f”Available: {’, ‘.join(UAT_SERVERS.keys())}”
+)
+if app_name not in APPLICATIONS:
+raise RemoteExecutionError(
+f”Unknown application ‘{app_name}’. “
+f”Available: {’, ’.join(APPLICATIONS.keys())}”
+)
+
+```
+server_cfg = UAT_SERVERS[server_name]
+app_cfg = APPLICATIONS[app_name]
+
+if app_cfg.allowed_servers and server_name not in app_cfg.allowed_servers:
+    raise RemoteExecutionError(
+        f"'{app_cfg.name}' is not allowed on '{server_name}'. "
+        f"Allowed servers: {', '.join(app_cfg.allowed_servers)}"
+    )
+
+return server_cfg, app_cfg
+```
+
+
+
+
+
+
+import argparse
+import sys
+from datetime import datetime
+from config import (
+APPLICATIONS,
+UAT_SERVERS,
+RemoteExecutionError,
+run_remote_command,
+validate_server_app,
+)
+
+def check_app_status(server_name: str, app_name: str) -> bool:
+“”“Check if the application is currently running on the server.”””
+_, app_cfg = validate_server_app(server_name, app_name)
+
+```
+if not app_cfg.health_check_cmd:
+    print(f"  No health check configured for '{app_cfg.name}', skipping.")
+    return False
+
+try:
+    run_remote_command(server_name, app_cfg.health_check_cmd, timeout=15)
     return True
-except Exception as e:
-    print(f"Failed to send email: {e}")
+except RemoteExecutionError:
     return False
 ```
 
-def check_memory_and_alert() -> None:
-“”“Sample memory, compute rolling average, and alert if needed.”””
-now = datetime.now()
-used_gb = get_memory_used_gb()
-memory_samples.append((now, used_gb))
+def start_app(server_name: str, app_name: str) -> str:
+“”“Start the application on the server.”””
+_, app_cfg = validate_server_app(server_name, app_name)
+command = f”cd {app_cfg.work_dir} && {app_cfg.start_cmd}”
+return run_remote_command(server_name, command)
+
+def stop_app(server_name: str, app_name: str) -> str:
+“”“Stop the application on the server.”””
+_, app_cfg = validate_server_app(server_name, app_name)
 
 ```
-prune_old_samples()
+if not app_cfg.stop_cmd:
+    raise RemoteExecutionError(f"No stop command configured for '{app_cfg.name}'")
 
-avg_gb = get_average_memory_gb()
-sample_count = len(memory_samples)
-print(f"[{now:%H:%M:%S}] Used: {used_gb} GB | "
-      f"Avg ({sample_count} samples): {avg_gb} GB | "
-      f"Threshold: {MEMORY_THRESHOLD_GB} GB")
-
-if avg_gb is not None and avg_gb > MEMORY_THRESHOLD_GB:
-    if can_send_email():
-        send_alert_email(avg_gb)
-    else:
-        remaining = EMAIL_COOLDOWN_MIN - (now - last_email_sent).seconds // 60
-        print(f"  → Threshold exceeded but email cooldown active ({remaining} min remaining)")
+command = f"cd {app_cfg.work_dir} && {app_cfg.stop_cmd}"
+return run_remote_command(server_name, command)
 ```
 
-def run_monitor() -> None:
-“”“Main loop — runs indefinitely, sampling every CHECK_INTERVAL_SEC.”””
-print(f”Memory monitor started (threshold: {MEMORY_THRESHOLD_GB} GB, “
-f”interval: {CHECK_INTERVAL_SEC}s, window: {AVERAGING_WINDOW_MIN} min)”)
-print(f”Total system memory: {round(psutil.virtual_memory().total / (1024**3), 2)} GB\n”)
+def restart_app(server_name: str, app_name: str) -> str:
+“”“Stop then start the application.”””
+_, app_cfg = validate_server_app(server_name, app_name)
+
+```
+print(f"  Stopping '{app_cfg.name}'...")
+try:
+    stop_app(server_name, app_name)
+except RemoteExecutionError as e:
+    print(f"  Warning during stop: {e}")
+
+print(f"  Starting '{app_cfg.name}'...")
+return start_app(server_name, app_name)
+```
+
+def run_custom_command(server_name: str, app_name: str, command: str) -> str:
+“”“Run a custom command in the application’s working directory.”””
+_, app_cfg = validate_server_app(server_name, app_name)
+full_cmd = f”cd {app_cfg.work_dir} && {command}”
+return run_remote_command(server_name, full_cmd)
+
+# =====================================================================
+
+# Main
+
+# =====================================================================
+
+ACTIONS = {
+“start”:   start_app,
+“stop”:    stop_app,
+“restart”: restart_app,
+“status”:  check_app_status,
+}
+
+def main(monitor_id: str, server_name: str, app_name: str, action: str, custom_cmd: str | None = None):
+timestamp = datetime.now().strftime(”%Y-%m-%d %H:%M:%S”)
+print(f”{’=’ * 60}”)
+print(f”  Run ID     : {monitor_id}”)
+print(f”  Server     : {server_name} ({UAT_SERVERS[server_name].hostname})”)
+print(f”  Application: {APPLICATIONS[app_name].name}”)
+print(f”  Action     : {action}”)
+print(f”  Timestamp  : {timestamp}”)
+print(f”{’=’ * 60}\n”)
 
 ```
 try:
-    while True:
-        check_memory_and_alert()
-        time.sleep(CHECK_INTERVAL_SEC)
-except KeyboardInterrupt:
-    print("\nMonitor stopped.")
+    if action == "run-cmd":
+        if not custom_cmd:
+            print("[ERROR] --cmd is required when action is 'run-cmd'")
+            sys.exit(1)
+        print(f"  Running custom command: {custom_cmd}\n")
+        output = run_custom_command(server_name, app_name, custom_cmd)
+
+    elif action == "status":
+        is_running = check_app_status(server_name, app_name)
+        status = "RUNNING ✓" if is_running else "NOT RUNNING ✗"
+        print(f"  Status: {status}\n")
+        return
+
+    else:
+        output = ACTIONS[action](server_name, app_name)
+
+    if output:
+        print(f"  Output:\n{output}\n")
+    print(f"[SUCCESS] Action '{action}' completed on {server_name}.")
+
+except RemoteExecutionError as e:
+    print(f"[FAILED] {e}")
+    sys.exit(1)
 ```
 
+# =====================================================================
+
+# CLI
+
+# =====================================================================
+
+def parse_args() -> argparse.Namespace:
+parser = argparse.ArgumentParser(
+description=“Run an application action on a UAT server.”,
+formatter_class=argparse.RawTextHelpFormatter,
+)
+parser.add_argument(
+“–id”, required=True,
+help=“Unique run/task identifier (e.g. TASK-101)”
+)
+parser.add_argument(
+“–server”, required=True,
+choices=list(UAT_SERVERS.keys()),
+help=f”Target UAT server.\nAvailable: {’, ‘.join(UAT_SERVERS.keys())}”
+)
+parser.add_argument(
+“–app”, required=True,
+choices=list(APPLICATIONS.keys()),
+help=f”Application to target.\nAvailable: {’, ’.join(APPLICATIONS.keys())}”
+)
+parser.add_argument(
+“–action”, required=True,
+choices=[“start”, “stop”, “restart”, “status”, “run-cmd”],
+help=“Action to perform on the application.”
+)
+parser.add_argument(
+“–cmd”, required=False, default=None,
+help=“Custom command to run (only with –action run-cmd).”
+)
+return parser.parse_args()
+
 if **name** == “**main**”:
-run_monitor()
+args = parse_args()
+main(
+monitor_id=args.id,
+server_name=args.server,
+app_name=args.app,
+action=args.action,
+custom_cmd=args.cmd,
+)
+
+
+
+
