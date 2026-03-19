@@ -8,6 +8,7 @@ pip install python-gnupg
 
 import gnupg
 import os
+import subprocess
 import tempfile
 import shutil
 
@@ -19,175 +20,164 @@ import shutil
 
 ENCRYPTED_FILE = “encrypted.pgp”       # Path to the encrypted file
 OUTPUT_FILE = “decrypted.txt”           # Path for the decrypted output
-PRIVATE_KEY_FILE = “private_key.key”    # Path to your .key / .asc private key
+PRIVATE_KEY_FILE = “private.key”        # Path to your .key / .asc private key
 PASSPHRASE = “your_passphrase_here”     # Passphrase for the private key
 
-# Path to gpg binary (set to None for auto-detect)
+# Path to gpg binary — find yours by running: where gpg (Windows) or which gpg (Mac/Linux)
 
-# Windows example: r”C:\Program Files (x86)\GnuPG\bin\gpg.exe”
+# Examples:
 
-# Mac/Linux example: “/usr/local/bin/gpg” or “/usr/bin/gpg”
+# Windows: r”C:\Program Files (x86)\GnuPG\bin\gpg.exe”
 
-GPG_BINARY = None
+# Mac:     “/usr/local/bin/gpg”
 
-# If your key is a raw string (e.g. from env variable or config),
+# Linux:   “/usr/bin/gpg”
 
-# paste it here instead of using a file. Set to None to use the file.
-
-PRIVATE_KEY_STRING = None
+GPG_BINARY = r”C:\Program Files (x86)\GnuPG\bin\gpg.exe”
 
 # ============================================================
 
-def fix_key_data(key_data):
-“””
-Fix common key formatting issues:
-- Replace literal ‘\n’ with actual newlines
-- Ensure proper PGP block structure
-“””
-# Replace literal \n with actual newlines
-if “\n” in key_data:
-key_data = key_data.replace(”\n”, “\n”)
+def find_gpg_binary():
+“”“Try to find the gpg binary automatically.”””
+try:
+result = subprocess.run(
+[“where”, “gpg”] if os.name == “nt” else [“which”, “gpg”],
+capture_output=True, text=True
+)
+if result.returncode == 0:
+path = result.stdout.strip().splitlines()[0]
+print(f”Found gpg at: {path}”)
+return path
+except Exception:
+pass
+return None
 
-```
-# Replace literal \r\n as well
-if "\\r\\n" in key_data:
-    key_data = key_data.replace("\\r\\n", "\n")
-
-# Remove any extra whitespace around lines
-lines = [line.strip() for line in key_data.splitlines()]
-key_data = "\n".join(lines)
-
-# Ensure there's a blank line after headers (required by PGP format)
-# PGP keys have headers like "Version: ..." after BEGIN block
-fixed_lines = []
-in_header = False
-for i, line in enumerate(lines):
-    fixed_lines.append(line)
-    if line.startswith("-----BEGIN PGP"):
-        in_header = True
-    elif in_header and line == "":
-        in_header = False
-    elif in_header and ":" not in line and line != "":
-        # We hit key data without a blank separator — insert one
-        fixed_lines.insert(-1, "")
-        in_header = False
-
-key_data = "\n".join(fixed_lines)
-
-return key_data
-```
-
-def decrypt_pgp_file(encrypted_file, output_file, key_file, passphrase,
-gpg_binary=None, key_string=None):
+def decrypt_pgp_file(encrypted_file, output_file, key_file, passphrase, gpg_binary=None):
 “””
 Decrypt a PGP-encrypted file using a private key and passphrase.
-
-```
-Args:
-    encrypted_file: Path to the encrypted .pgp/.gpg file
-    output_file:    Path to write the decrypted output
-    key_file:       Path to the private key file (.key, .asc, .gpg)
-    passphrase:     Passphrase for the private key
-    gpg_binary:     Optional path to gpg binary
-    key_string:     Optional raw key string (used instead of key_file)
-
-Returns:
-    True if decryption succeeded, False otherwise
-"""
-# Set up a temporary GnuPG home directory
-gnupg_home = tempfile.mkdtemp(prefix="gnupg_")
-
-try:
-    if gpg_binary:
-        gpg = gnupg.GPG(gnupghome=gnupg_home, gpgbinary=gpg_binary)
-    else:
-        gpg = gnupg.GPG(gnupghome=gnupg_home)
-
-    gpg.encoding = "utf-8"
-
-    # --- Step 1: Read the private key ---
-    if key_string:
-        key_data = key_string
-        print("Using provided key string...")
-    else:
-        if not os.path.isfile(key_file):
-            print(f"Error: Private key file not found: {key_file}")
-            return False
-
-        try:
-            with open(key_file, "r", encoding="utf-8") as f:
-                key_data = f.read()
-        except UnicodeDecodeError:
-            with open(key_file, "rb") as f:
-                key_data = f.read()
-                # Binary key — import directly without fixing
-                import_result = gpg.import_keys(key_data, passphrase=passphrase)
-                if import_result.count == 0:
-                    print("Error: Failed to import binary key.")
-                    print(f"  Details: {import_result.results}")
-                    return False
-                print(f"Imported {import_result.count} key(s) (binary format)")
-                # Skip to decryption
-                return _do_decrypt(gpg, encrypted_file, output_file, passphrase)
-
-    # --- Step 2: Fix key formatting issues ---
-    print(f"\nOriginal key preview (first 200 chars):")
-    print(repr(key_data[:200]))
-
-    key_data = fix_key_data(key_data)
-
-    print(f"\nFixed key preview (first 200 chars):")
-    print(key_data[:200])
-
-    # Verify it looks like a PGP key
-    if "-----BEGIN PGP PRIVATE KEY BLOCK-----" not in key_data:
-        print("\nWarning: Key data does not contain PGP PRIVATE KEY BLOCK header.")
-        print("Make sure you're using the correct key file.")
-
-    # --- Step 3: Import the private key ---
-    import_result = gpg.import_keys(key_data, passphrase=passphrase)
-
-    print(f"\nImport results:")
-    print(f"  Count: {import_result.count}")
-    print(f"  Fingerprints: {import_result.fingerprints}")
-    print(f"  Results: {import_result.results}")
-
-    if import_result.count == 0:
-        print("\nError: Failed to import private key.")
-        print("Possible causes:")
-        print("  - Key format is corrupted or not a valid PGP key")
-        print("  - Wrong passphrase for a protected key")
-        print("  - The .key file is not a PGP private key")
-        return False
-
-    # --- Step 4: Decrypt the file ---
-    return _do_decrypt(gpg, encrypted_file, output_file, passphrase)
-
-finally:
-    # Clean up temp directory
-    shutil.rmtree(gnupg_home, ignore_errors=True)
-```
-
-def _do_decrypt(gpg, encrypted_file, output_file, passphrase):
-“”“Perform the actual decryption.”””
-if not os.path.isfile(encrypted_file):
-print(f”Error: Encrypted file not found: {encrypted_file}”)
+Uses subprocess for key import (more reliable) and python-gnupg for decryption.
+“””
+# Find gpg binary
+gpg_path = gpg_binary or find_gpg_binary()
+if not gpg_path or not os.path.isfile(gpg_path):
+print(f”Error: gpg binary not found at: {gpg_path}”)
+print(“Run ‘where gpg’ (Windows) or ‘which gpg’ (Mac/Linux) and set GPG_BINARY.”)
 return False
 
 ```
-with open(encrypted_file, "rb") as f:
-    decrypted = gpg.decrypt_file(f, passphrase=passphrase, output=output_file)
+print(f"Using gpg: {gpg_path}")
 
-if decrypted.ok:
-    print(f"\nDecryption successful!")
+# Create a temporary gnupg home
+gnupg_home = tempfile.mkdtemp(prefix="gnupg_")
+print(f"Temp keyring: {gnupg_home}")
+
+try:
+    # --- Step 1: Import key using subprocess (same as running gpg --import) ---
+    key_file = os.path.abspath(key_file)
+    if not os.path.isfile(key_file):
+        print(f"Error: Key file not found: {key_file}")
+        return False
+
+    print(f"\nImporting key from: {key_file}")
+
+    import_cmd = [
+        gpg_path,
+        "--homedir", gnupg_home,
+        "--batch",
+        "--yes",
+        "--passphrase", passphrase,
+        "--pinentry-mode", "loopback",
+        "--import", key_file
+    ]
+
+    result = subprocess.run(import_cmd, capture_output=True, text=True)
+
+    print(f"  Import stdout: {result.stdout}")
+    print(f"  Import stderr: {result.stderr}")
+
+    if result.returncode != 0:
+        # Some gpg versions print success info on stderr, so check content
+        if "secret key imported" not in result.stderr.lower() and \
+           "imported:" not in result.stderr.lower():
+            print("Error: Key import failed.")
+            return False
+
+    print("Key imported successfully!")
+
+    # --- Step 2: Decrypt using python-gnupg (pointed at same homedir) ---
+    gpg = gnupg.GPG(gnupghome=gnupg_home, gpgbinary=gpg_path)
+    gpg.encoding = "utf-8"
+
+    # Verify key is in the keyring
+    keys = gpg.list_keys(secret=True)
+    print(f"\nPrivate keys in keyring: {len(keys)}")
+    for k in keys:
+        print(f"  UID: {', '.join(k['uids'])}")
+        print(f"  Fingerprint: {k['fingerprint']}")
+
+    if not keys:
+        print("Warning: No private keys found after import.")
+
+    # Decrypt
+    encrypted_file = os.path.abspath(encrypted_file)
+    output_file = os.path.abspath(output_file)
+
+    if not os.path.isfile(encrypted_file):
+        print(f"Error: Encrypted file not found: {encrypted_file}")
+        return False
+
+    print(f"\nDecrypting: {encrypted_file}")
+
+    with open(encrypted_file, "rb") as f:
+        decrypted = gpg.decrypt_file(
+            f,
+            passphrase=passphrase,
+            output=output_file,
+            extra_args=["--pinentry-mode", "loopback"]
+        )
+
+    if decrypted.ok:
+        print(f"\nDecryption successful!")
+        print(f"  Output saved to: {output_file}")
+        return True
+    else:
+        print(f"\nDecryption via python-gnupg failed: {decrypted.status}")
+        print("Trying direct subprocess decryption as fallback...")
+
+        # --- Fallback: Decrypt entirely via subprocess ---
+        return decrypt_via_subprocess(
+            gpg_path, gnupg_home, encrypted_file, output_file, passphrase
+        )
+
+finally:
+    shutil.rmtree(gnupg_home, ignore_errors=True)
+```
+
+def decrypt_via_subprocess(gpg_path, gnupg_home, encrypted_file, output_file, passphrase):
+“”“Fallback: decrypt using gpg command directly.”””
+decrypt_cmd = [
+gpg_path,
+“–homedir”, gnupg_home,
+“–batch”,
+“–yes”,
+“–passphrase”, passphrase,
+“–pinentry-mode”, “loopback”,
+“–output”, output_file,
+“–decrypt”, encrypted_file
+]
+
+```
+result = subprocess.run(decrypt_cmd, capture_output=True, text=True)
+
+print(f"  Decrypt stdout: {result.stdout}")
+print(f"  Decrypt stderr: {result.stderr}")
+
+if result.returncode == 0 and os.path.isfile(output_file):
+    print(f"\nDecryption successful (subprocess fallback)!")
     print(f"  Output saved to: {output_file}")
-    if decrypted.fingerprint:
-        print(f"  Signed by: {decrypted.fingerprint}")
     return True
 else:
     print(f"\nDecryption failed!")
-    print(f"  Status: {decrypted.status}")
-    print(f"  Details: {decrypted.stderr}")
     return False
 ```
 
@@ -200,7 +190,6 @@ output_file=OUTPUT_FILE,
 key_file=PRIVATE_KEY_FILE,
 passphrase=PASSPHRASE,
 gpg_binary=GPG_BINARY,
-key_string=PRIVATE_KEY_STRING,
 )
 
 ```
