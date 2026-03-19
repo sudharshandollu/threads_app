@@ -1,15 +1,15 @@
 “””
 PGP File Decryptor
 Decrypts PGP-encrypted files using a private key and passphrase.
+Works on Windows, Linux, and macOS — auto-detects gpg binary and home directory.
 
 Requirements:
 pip install python-gnupg
 “””
 
-import gnupg
 import os
+import platform
 import subprocess
-import tempfile
 import shutil
 
 # ============================================================
@@ -23,161 +23,177 @@ OUTPUT_FILE = “decrypted.txt”           # Path for the decrypted output
 PRIVATE_KEY_FILE = “private.key”        # Path to your .key / .asc private key
 PASSPHRASE = “your_passphrase_here”     # Passphrase for the private key
 
-# Path to gpg binary — find yours by running: where gpg (Windows) or which gpg (Mac/Linux)
-
-# Examples:
-
-# Windows: r”C:\Program Files (x86)\GnuPG\bin\gpg.exe”
-
-# Mac:     “/usr/local/bin/gpg”
-
-# Linux:   “/usr/bin/gpg”
-
-GPG_BINARY = r”C:\Program Files (x86)\GnuPG\bin\gpg.exe”
-
 # ============================================================
 
-def find_gpg_binary():
-“”“Try to find the gpg binary automatically.”””
-try:
-result = subprocess.run(
-[“where”, “gpg”] if os.name == “nt” else [“which”, “gpg”],
-capture_output=True, text=True
-)
-if result.returncode == 0:
-path = result.stdout.strip().splitlines()[0]
-print(f”Found gpg at: {path}”)
-return path
-except Exception:
-pass
-return None
+def get_gpg_binary():
+“”“Auto-detect the gpg binary path based on the OS.”””
+system = platform.system()
 
-def decrypt_pgp_file(encrypted_file, output_file, key_file, passphrase, gpg_binary=None):
+```
+if system == "Windows":
+    common_paths = [
+        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "GnuPG", "bin", "gpg.exe"),
+        os.path.join(os.environ.get("ProgramFiles", ""), "GnuPG", "bin", "gpg.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "GnuPG", "bin", "gpg.exe"),
+    ]
+    for path in common_paths:
+        if os.path.isfile(path):
+            return path
+
+    # Fallback: try 'where gpg'
+    try:
+        result = subprocess.run(["where", "gpg"], capture_output=True, text=True)
+        if result.returncode == 0:
+            return result.stdout.strip().splitlines()[0]
+    except Exception:
+        pass
+
+else:
+    # Linux / macOS
+    try:
+        result = subprocess.run(["which", "gpg"], capture_output=True, text=True)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+
+    common_paths = ["/usr/bin/gpg", "/usr/local/bin/gpg", "/opt/homebrew/bin/gpg"]
+    for path in common_paths:
+        if os.path.isfile(path):
+            return path
+
+return None
+```
+
+def get_gpg_home():
+“”“Auto-detect the GnuPG home directory based on the OS.”””
+# First try: ask gpgconf (most reliable)
+try:
+gpg_binary = get_gpg_binary()
+if gpg_binary:
+gpgconf = os.path.join(os.path.dirname(gpg_binary), “gpgconf”)
+if platform.system() == “Windows”:
+gpgconf += “.exe”
+
+```
+        if os.path.isfile(gpgconf):
+            result = subprocess.run(
+                [gpgconf, "--list-dirs", "homedir"],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                home = result.stdout.strip()
+                if os.path.isdir(home):
+                    return home
+except Exception:
+    pass
+
+# Second try: check GNUPGHOME environment variable
+env_home = os.environ.get("GNUPGHOME")
+if env_home and os.path.isdir(env_home):
+    return env_home
+
+# Third try: default paths per OS
+system = platform.system()
+if system == "Windows":
+    default = os.path.join(os.environ.get("APPDATA", ""), "gnupg")
+else:
+    default = os.path.join(os.path.expanduser("~"), ".gnupg")
+
+if os.path.isdir(default):
+    return default
+
+return None
+```
+
+def decrypt_pgp_file(encrypted_file, output_file, key_file, passphrase):
 “””
-Decrypt a PGP-encrypted file using a private key and passphrase.
-Uses subprocess for key import (more reliable) and python-gnupg for decryption.
+Decrypt a PGP file by importing the key and decrypting via subprocess.
+Auto-detects gpg binary and home directory.
 “””
-# Find gpg binary
-gpg_path = gpg_binary or find_gpg_binary()
-if not gpg_path or not os.path.isfile(gpg_path):
-print(f”Error: gpg binary not found at: {gpg_path}”)
-print(“Run ‘where gpg’ (Windows) or ‘which gpg’ (Mac/Linux) and set GPG_BINARY.”)
+# — Auto-detect gpg binary —
+gpg_path = get_gpg_binary()
+if not gpg_path:
+print(“Error: Could not find gpg binary.”)
+print(”  Windows: Install from https://gpg4win.org”)
+print(”  Mac:     brew install gnupg”)
+print(”  Linux:   sudo apt install gnupg”)
 return False
 
 ```
-print(f"Using gpg: {gpg_path}")
+# --- Auto-detect gpg home ---
+homedir = get_gpg_home()
+if not homedir:
+    print("Error: Could not find GnuPG home directory.")
+    print('  Run "gpgconf --list-dirs homedir" to find it.')
+    return False
 
-# Create a temporary gnupg home
-gnupg_home = tempfile.mkdtemp(prefix="gnupg_")
-print(f"Temp keyring: {gnupg_home}")
+key_file = os.path.abspath(key_file)
+encrypted_file = os.path.abspath(encrypted_file)
+output_file = os.path.abspath(output_file)
 
-try:
-    # --- Step 1: Import key using subprocess (same as running gpg --import) ---
-    key_file = os.path.abspath(key_file)
-    if not os.path.isfile(key_file):
-        print(f"Error: Key file not found: {key_file}")
-        return False
+if not os.path.isfile(key_file):
+    print(f"Error: Key file not found: {key_file}")
+    return False
 
-    print(f"\nImporting key from: {key_file}")
+if not os.path.isfile(encrypted_file):
+    print(f"Error: Encrypted file not found: {encrypted_file}")
+    return False
 
-    import_cmd = [
-        gpg_path,
-        "--homedir", gnupg_home,
-        "--batch",
-        "--yes",
-        "--passphrase", passphrase,
-        "--pinentry-mode", "loopback",
-        "--import", key_file
-    ]
+print(f"System:      {platform.system()} {platform.release()}")
+print(f"GPG binary:  {gpg_path}")
+print(f"GPG home:    {homedir}")
+print(f"Key file:    {key_file}")
+print(f"Input file:  {encrypted_file}")
+print(f"Output file: {output_file}")
 
-    result = subprocess.run(import_cmd, capture_output=True, text=True)
-
-    print(f"  Import stdout: {result.stdout}")
-    print(f"  Import stderr: {result.stderr}")
-
-    if result.returncode != 0:
-        # Some gpg versions print success info on stderr, so check content
-        if "secret key imported" not in result.stderr.lower() and \
-           "imported:" not in result.stderr.lower():
-            print("Error: Key import failed.")
-            return False
-
-    print("Key imported successfully!")
-
-    # --- Step 2: Decrypt using python-gnupg (pointed at same homedir) ---
-    gpg = gnupg.GPG(gnupghome=gnupg_home, gpgbinary=gpg_path)
-    gpg.encoding = "utf-8"
-
-    # Verify key is in the keyring
-    keys = gpg.list_keys(secret=True)
-    print(f"\nPrivate keys in keyring: {len(keys)}")
-    for k in keys:
-        print(f"  UID: {', '.join(k['uids'])}")
-        print(f"  Fingerprint: {k['fingerprint']}")
-
-    if not keys:
-        print("Warning: No private keys found after import.")
-
-    # Decrypt
-    encrypted_file = os.path.abspath(encrypted_file)
-    output_file = os.path.abspath(output_file)
-
-    if not os.path.isfile(encrypted_file):
-        print(f"Error: Encrypted file not found: {encrypted_file}")
-        return False
-
-    print(f"\nDecrypting: {encrypted_file}")
-
-    with open(encrypted_file, "rb") as f:
-        decrypted = gpg.decrypt_file(
-            f,
-            passphrase=passphrase,
-            output=output_file,
-            extra_args=["--pinentry-mode", "loopback"]
-        )
-
-    if decrypted.ok:
-        print(f"\nDecryption successful!")
-        print(f"  Output saved to: {output_file}")
-        return True
-    else:
-        print(f"\nDecryption via python-gnupg failed: {decrypted.status}")
-        print("Trying direct subprocess decryption as fallback...")
-
-        # --- Fallback: Decrypt entirely via subprocess ---
-        return decrypt_via_subprocess(
-            gpg_path, gnupg_home, encrypted_file, output_file, passphrase
-        )
-
-finally:
-    shutil.rmtree(gnupg_home, ignore_errors=True)
-```
-
-def decrypt_via_subprocess(gpg_path, gnupg_home, encrypted_file, output_file, passphrase):
-“”“Fallback: decrypt using gpg command directly.”””
-decrypt_cmd = [
-gpg_path,
-“–homedir”, gnupg_home,
-“–batch”,
-“–yes”,
-“–passphrase”, passphrase,
-“–pinentry-mode”, “loopback”,
-“–output”, output_file,
-“–decrypt”, encrypted_file
+# --- Step 1: Import the private key ---
+print("\n--- Importing private key ---")
+import_cmd = [
+    gpg_path,
+    "--homedir", homedir,
+    "--batch",
+    "--yes",
+    "--passphrase", passphrase,
+    "--pinentry-mode", "loopback",
+    "--import", key_file
 ]
 
-```
-result = subprocess.run(decrypt_cmd, capture_output=True, text=True)
+result = subprocess.run(import_cmd, capture_output=True, text=True)
+print(result.stderr)
 
-print(f"  Decrypt stdout: {result.stdout}")
-print(f"  Decrypt stderr: {result.stderr}")
+if result.returncode != 0:
+    stderr_lower = result.stderr.lower()
+    if "imported" not in stderr_lower and "not changed" not in stderr_lower:
+        print("Error: Key import failed.")
+        return False
+
+print("Key import done!")
+
+# --- Step 2: Decrypt the file ---
+print("\n--- Decrypting file ---")
+decrypt_cmd = [
+    gpg_path,
+    "--homedir", homedir,
+    "--batch",
+    "--yes",
+    "--passphrase", passphrase,
+    "--pinentry-mode", "loopback",
+    "--output", output_file,
+    "--decrypt", encrypted_file
+]
+
+result = subprocess.run(decrypt_cmd, capture_output=True, text=True)
+print(result.stderr)
 
 if result.returncode == 0 and os.path.isfile(output_file):
-    print(f"\nDecryption successful (subprocess fallback)!")
-    print(f"  Output saved to: {output_file}")
+    file_size = os.path.getsize(output_file)
+    print(f"\nDecryption successful!")
+    print(f"  Output: {output_file}")
+    print(f"  Size:   {file_size} bytes")
     return True
 else:
-    print(f"\nDecryption failed!")
+    print(f"\nDecryption failed! Return code: {result.returncode}")
     return False
 ```
 
@@ -189,7 +205,6 @@ encrypted_file=ENCRYPTED_FILE,
 output_file=OUTPUT_FILE,
 key_file=PRIVATE_KEY_FILE,
 passphrase=PASSPHRASE,
-gpg_binary=GPG_BINARY,
 )
 
 ```
@@ -198,3 +213,5 @@ if success:
 else:
     print("\nSomething went wrong. Check the errors above.")
 ```
+
+
