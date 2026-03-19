@@ -4,193 +4,101 @@ Decrypts PGP-encrypted files using a private key and passphrase.
 
 Requirements:
 pip install python-gnupg
-
-Usage:
-python pgp_decrypt.py –input encrypted.pgp –output decrypted.txt –keyfile private_key.asc –passphrase “your_passphrase”
 “””
 
 import gnupg
-import argparse
-import sys
 import os
-import getpass
 import tempfile
 
-class PGPDecryptor:
-def **init**(self, gnupg_home=None):
-“”“Initialize the PGP decryptor with a GnuPG home directory.”””
-self.gnupg_home = gnupg_home or tempfile.mkdtemp(prefix=“gnupg_”)
-self.gpg = gnupg.GPG(gnupghome=self.gnupg_home)
-self.gpg.encoding = “utf-8”
+# ============================================================
+
+# CONFIGURE THESE VALUES
+
+# ============================================================
+
+ENCRYPTED_FILE = “encrypted.pgp”       # Path to the encrypted file
+OUTPUT_FILE = “decrypted.txt”           # Path for the decrypted output
+PRIVATE_KEY_FILE = “private_key.key”    # Path to your .key / .asc private key
+PASSPHRASE = “your_passphrase_here”     # Passphrase for the private key
+
+# ============================================================
+
+def decrypt_pgp_file(encrypted_file, output_file, key_file, passphrase):
+“””
+Decrypt a PGP-encrypted file using a private key and passphrase.
 
 ```
-def import_private_key(self, key_path: str, passphrase: str = None) -> dict:
-    """Import a private key from a file."""
-    if not os.path.isfile(key_path):
-        raise FileNotFoundError(f"Private key file not found: {key_path}")
+Args:
+    encrypted_file: Path to the encrypted .pgp/.gpg file
+    output_file:    Path to write the decrypted output
+    key_file:       Path to the private key file (.key, .asc, .gpg)
+    passphrase:     Passphrase for the private key
 
-    with open(key_path, "r") as f:
+Returns:
+    True if decryption succeeded, False otherwise
+"""
+# Set up a temporary GnuPG home directory
+gnupg_home = tempfile.mkdtemp(prefix="gnupg_")
+gpg = gnupg.GPG(gnupghome=gnupg_home)
+gpg.encoding = "utf-8"
+
+# --- Step 1: Import the private key ---
+if not os.path.isfile(key_file):
+    print(f"Error: Private key file not found: {key_file}")
+    return False
+
+# Read key file (handles both ASCII-armored and binary formats)
+try:
+    with open(key_file, "r") as f:
+        key_data = f.read()
+except UnicodeDecodeError:
+    with open(key_file, "rb") as f:
         key_data = f.read()
 
-    result = self.gpg.import_keys(key_data, passphrase=passphrase)
+import_result = gpg.import_keys(key_data, passphrase=passphrase)
 
-    if result.count == 0:
-        raise ValueError(
-            f"Failed to import key. Results: {result.results}"
-        )
+if import_result.count == 0:
+    print(f"Error: Failed to import private key.")
+    print(f"  Details: {import_result.results}")
+    return False
 
-    print(f"Successfully imported {result.count} key(s).")
-    print(f"  Fingerprints: {result.fingerprints}")
-    return {
-        "count": result.count,
-        "fingerprints": result.fingerprints,
-    }
+print(f"Imported {import_result.count} key(s)")
+print(f"  Fingerprints: {import_result.fingerprints}")
 
-def import_private_key_from_string(self, key_data: str, passphrase: str = None) -> dict:
-    """Import a private key directly from a string."""
-    result = self.gpg.import_keys(key_data, passphrase=passphrase)
+# --- Step 2: Decrypt the file ---
+if not os.path.isfile(encrypted_file):
+    print(f"Error: Encrypted file not found: {encrypted_file}")
+    return False
 
-    if result.count == 0:
-        raise ValueError(
-            f"Failed to import key. Results: {result.results}"
-        )
+with open(encrypted_file, "rb") as f:
+    decrypted = gpg.decrypt_file(f, passphrase=passphrase, output=output_file)
 
-    print(f"Successfully imported {result.count} key(s).")
-    return {
-        "count": result.count,
-        "fingerprints": result.fingerprints,
-    }
-
-def decrypt_file(self, input_path: str, output_path: str, passphrase: str) -> bool:
-    """
-    Decrypt a PGP-encrypted file.
-
-    Args:
-        input_path:  Path to the encrypted .pgp/.gpg file
-        output_path: Path to write the decrypted output
-        passphrase:  Passphrase for the private key
-
-    Returns:
-        True if decryption succeeded, False otherwise
-    """
-    if not os.path.isfile(input_path):
-        raise FileNotFoundError(f"Encrypted file not found: {input_path}")
-
-    with open(input_path, "rb") as f:
-        decrypted = self.gpg.decrypt_file(f, passphrase=passphrase, output=output_path)
-
-    if decrypted.ok:
-        print(f"Decryption successful!")
-        print(f"  Output: {output_path}")
-        print(f"  Status: {decrypted.status}")
-        if decrypted.fingerprint:
-            print(f"  Signed by fingerprint: {decrypted.fingerprint}")
-        return True
-    else:
-        print(f"Decryption failed!")
-        print(f"  Status: {decrypted.status}")
-        print(f"  Stderr: {decrypted.stderr}")
-        return False
-
-def decrypt_bytes(self, encrypted_data: bytes, passphrase: str) -> bytes | None:
-    """
-    Decrypt PGP-encrypted bytes in memory.
-
-    Args:
-        encrypted_data: The encrypted content as bytes
-        passphrase:     Passphrase for the private key
-
-    Returns:
-        Decrypted bytes, or None if decryption failed
-    """
-    decrypted = self.gpg.decrypt(encrypted_data, passphrase=passphrase)
-
-    if decrypted.ok:
-        return decrypted.data
-    else:
-        print(f"Decryption failed: {decrypted.status}")
-        return None
-
-def list_keys(self, secret=True):
-    """List keys in the keyring."""
-    keys = self.gpg.list_keys(secret=secret)
-    key_type = "Private" if secret else "Public"
-    print(f"\n{key_type} keys in keyring:")
-    if not keys:
-        print("  (none)")
-    for k in keys:
-        print(f"  UID:         {', '.join(k['uids'])}")
-        print(f"  Fingerprint: {k['fingerprint']}")
-        print(f"  Created:     {k['date']}")
-        print(f"  Expires:     {k.get('expires', 'never')}")
-        print()
-    return keys
+if decrypted.ok:
+    print(f"\nDecryption successful!")
+    print(f"  Output saved to: {output_file}")
+    if decrypted.fingerprint:
+        print(f"  Signed by: {decrypted.fingerprint}")
+    return True
+else:
+    print(f"\nDecryption failed!")
+    print(f"  Status: {decrypted.status}")
+    print(f"  Details: {decrypted.stderr}")
+    return False
 ```
 
-def main():
-parser = argparse.ArgumentParser(
-description=“Decrypt PGP-encrypted files using a private key and passphrase.”
-)
-parser.add_argument(
-“-i”, “–input”, required=True,
-help=“Path to the encrypted PGP file”
-)
-parser.add_argument(
-“-o”, “–output”, required=True,
-help=“Path for the decrypted output file”
-)
-parser.add_argument(
-“-k”, “–keyfile”, required=True,
-help=“Path to the ASCII-armored private key file (.asc)”
-)
-parser.add_argument(
-“-p”, “–passphrase”, default=None,
-help=“Passphrase for the private key (prompted if not provided)”
-)
-parser.add_argument(
-“–gnupg-home”, default=None,
-help=“Custom GnuPG home directory (default: temp directory)”
-)
-parser.add_argument(
-“–list-keys”, action=“store_true”,
-help=“List imported keys after import”
-)
-
-```
-args = parser.parse_args()
-
-# Prompt for passphrase securely if not provided
-passphrase = args.passphrase
-if passphrase is None:
-    passphrase = getpass.getpass("Enter private key passphrase: ")
-
-try:
-    decryptor = PGPDecryptor(gnupg_home=args.gnupg_home)
-
-    # Step 1: Import the private key
-    print(f"Importing private key from: {args.keyfile}")
-    decryptor.import_private_key(args.keyfile, passphrase=passphrase)
-
-    # Step 2 (optional): List keys
-    if args.list_keys:
-        decryptor.list_keys(secret=True)
-
-    # Step 3: Decrypt the file
-    print(f"\nDecrypting: {args.input}")
-    success = decryptor.decrypt_file(args.input, args.output, passphrase)
-
-    sys.exit(0 if success else 1)
-
-except FileNotFoundError as e:
-    print(f"Error: {e}", file=sys.stderr)
-    sys.exit(1)
-except ValueError as e:
-    print(f"Key import error: {e}", file=sys.stderr)
-    sys.exit(1)
-except Exception as e:
-    print(f"Unexpected error: {e}", file=sys.stderr)
-    sys.exit(1)
-```
+# — Run —
 
 if **name** == “**main**”:
-main()
+success = decrypt_pgp_file(
+encrypted_file=ENCRYPTED_FILE,
+output_file=OUTPUT_FILE,
+key_file=PRIVATE_KEY_FILE,
+passphrase=PASSPHRASE,
+)
+
+```
+if success:
+    print("\nDone! Check your output file.")
+else:
+    print("\nSomething went wrong. Check the errors above.")
+```
